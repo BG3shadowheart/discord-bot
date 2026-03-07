@@ -1,4 +1,4 @@
-# NSFW Discord Bot v2 — Full Setup Guide
+# NSFW Discord Bot — Full Setup Guide
 # =========================================
 # For personal use on a private Discord server.
 # You are fully responsible for legal compliance in your jurisdiction.
