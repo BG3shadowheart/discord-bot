@@ -3,6 +3,8 @@ from threading import Thread
 import os, sys, io, json, random, hashlib, logging, re, asyncio
 import xml.etree.ElementTree as ET
 from urllib.parse import quote_plus
+from collections import deque
+import datetime
 
 import aiohttp
 import discord
@@ -45,9 +47,9 @@ REQUEST_TIMEOUT = int(os.getenv("REQUEST_TIMEOUT", "14"))
 DISCORD_MAX_UPLOAD = int(os.getenv("DISCORD_MAX_UPLOAD", str(8 * 1024 * 1024)))
 HEAD_SIZE_LIMIT = DISCORD_MAX_UPLOAD
 DATA_FILE = os.getenv("DATA_FILE", "data_nsfw.json")
-AUTOSAVE_INTERVAL = int(os.getenv("AUTOSAVE_INTERVAL", "30"))
+AUTOSAVE_INTERVAL = int(os.getenv("AUTOSAVE_INTERVAL", "90"))
 FETCH_ATTEMPTS = int(os.getenv("FETCH_ATTEMPTS", "40"))
-MAX_USED_GIFS_PER_USER = int(os.getenv("MAX_USED_GIFS_PER_USER", "1000"))
+MAX_USED_GIFS_PER_USER = int(os.getenv("MAX_USED_GIFS_PER_USER", "300"))
 
 VC_CHANNEL_ID = int(os.getenv("VC_CHANNEL_ID", "0"))
 _VC_IDS_RAW = os.getenv("VC_IDS", "")
@@ -64,15 +66,23 @@ if not VC_CHANNEL_ID:
 
 if not os.path.exists(DATA_FILE):
     with open(DATA_FILE, "w") as f:
-        json.dump({"sent_history": {}, "vc_state": {}}, f, indent=2)
+        json.dump({"sent_history": {}, "vc_state": {}, "first_seen": {}}, f, indent=2)
 
 with open(DATA_FILE, "r") as f:
     data = json.load(f)
 
 data.setdefault("sent_history", {})
 data.setdefault("vc_state", {})
+data.setdefault("first_seen", {})
+
+last_save_time = 0
 
 def save_data():
+    global last_save_time
+    now = datetime.datetime.now().timestamp()
+    if now - last_save_time < 5:
+        return
+    last_save_time = now
     try:
         with open(DATA_FILE, "w") as f:
             json.dump(data, f, indent=2)
@@ -125,10 +135,10 @@ async def compress_image(image_bytes, target_size=DISCORD_MAX_UPLOAD):
         img = Image.open(io.BytesIO(image_bytes))
         if img.format == "GIF": return image_bytes
         output = io.BytesIO()
-        quality = 95
+        quality = 85
         while quality > 10:
             output.seek(0); output.truncate()
-            img.save(output, format=img.format or "JPEG", quality=quality, optimize=True)
+            img.save(output, format=img.format or "JPEG", quality=quality, optimize=True, progressive=True)
             if output.tell() <= target_size: return output.getvalue()
             quality -= 10
         return output.getvalue()
@@ -457,13 +467,14 @@ async def _fetch_one(session, used_hashes=None):
 
 async def fetch_gif(session, user_id=None):
     uid = str(user_id) if user_id else "global"
-    history = data["sent_history"].setdefault(uid, [])
+    if uid not in data["sent_history"]:
+        data["sent_history"][uid] = deque(maxlen=MAX_USED_GIFS_PER_USER)
+    history = data["sent_history"][uid]
     used = set(history)
     for _ in range(FETCH_ATTEMPTS):
         url, source, meta, url_hash = await _fetch_one(session, used)
         if url:
             history.append(url_hash)
-            if len(history) > MAX_USED_GIFS_PER_USER: history.pop(0)
             data["sent_history"][uid] = history
             return url, source, meta
     return None, None, None
@@ -652,13 +663,31 @@ LEAVE_GREETINGS = [
     "🐍 {display_name} coiled away into the dark. Until next time.",
 ]
 
+SPECIAL_FIRST_JOIN = [
+    "💖 Oh... {display_name}... this is your first time here? My heart is racing~ Welcome home, darling.",
+    "🌸 {display_name}... I've been waiting for you. First time in my room? Let me make it unforgettable.",
+    "✨ {display_name} stepped in for the first time... the air feels different now. Welcome, my special one.",
+    "🔥 First time, {display_name}? My cheeks are burning... come closer, let me show you around.",
+]
+
+def get_greeting_list(is_join: bool, is_first: bool):
+    hour = datetime.datetime.now().hour
+    if is_first and is_join:
+        return SPECIAL_FIRST_JOIN
+    if 0 <= hour < 6:
+        return [g for g in (JOIN_GREETINGS if is_join else LEAVE_GREETINGS) if "🌙" in g or "🌑" in g or "🌒" in g][:15] or (JOIN_GREETINGS if is_join else LEAVE_GREETINGS)
+    if 6 <= hour < 12:
+        return [g for g in (JOIN_GREETINGS if is_join else LEAVE_GREETINGS) if "🌸" in g or "🌺" in g][:15] or (JOIN_GREETINGS if is_join else LEAVE_GREETINGS)
+    return JOIN_GREETINGS if is_join else LEAVE_GREETINGS
+
 async def send_greeting_embed(channel, session, greeting_text, image_url, member, send_to_dm=None):
     try:
         image_bytes, content_type = await _download_bytes(session, image_url)
         if image_bytes and len(image_bytes) > DISCORD_MAX_UPLOAD:
             image_bytes = await compress_image(image_bytes)
         if not image_bytes or len(image_bytes) > DISCORD_MAX_UPLOAD:
-            await channel.send(greeting_text)
+            msg = await channel.send(greeting_text)
+            await msg.add_reaction("❤️")
             return
 
         lurl = image_url.lower()
@@ -670,25 +699,32 @@ async def send_greeting_embed(channel, session, greeting_text, image_url, member
         filename = f"waifu{ext}"
 
         ch_file = discord.File(io.BytesIO(image_bytes), filename=filename)
-        ch_embed = discord.Embed(description=greeting_text, color=discord.Color.from_rgb(220, 53, 69))
-        ch_embed.set_author(name=member.display_name, icon_url=getattr(member.display_avatar, "url", None))
+        hue = random.random()
+        color = discord.Color.from_hsv(hue, 0.85, 0.98)
+        ch_embed = discord.Embed(description=greeting_text, color=color)
+        ch_embed.set_author(name=f"💖 {member.display_name}", icon_url=getattr(member.display_avatar, "url", None))
         ch_embed.set_image(url=f"attachment://{filename}")
-        ch_embed.set_footer(text="Your Personal waifu")
-        await channel.send(embed=ch_embed, file=ch_file)
+        ch_embed.set_footer(text=f"~ Your waifu • {random.choice(['♡','✧','❀','🌸','💕'])}")
+        ch_embed.timestamp = discord.utils.utcnow()
+        msg = await channel.send(embed=ch_embed, file=ch_file)
+        await msg.add_reaction("❤️")
 
         if send_to_dm:
             try:
                 dm_file = discord.File(io.BytesIO(image_bytes), filename=filename)
-                dm_embed = discord.Embed(description=greeting_text, color=discord.Color.from_rgb(46, 204, 113))
-                dm_embed.set_author(name=member.display_name, icon_url=getattr(member.display_avatar, "url", None))
+                dm_embed = discord.Embed(description=greeting_text, color=color)
+                dm_embed.set_author(name=f"💖 {member.display_name}", icon_url=getattr(member.display_avatar, "url", None))
                 dm_embed.set_image(url=f"attachment://{filename}")
-                dm_embed.set_footer(text="Your Personal waifu")
-                await send_to_dm.send(embed=dm_embed, file=dm_file)
+                dm_embed.set_footer(text=f"~ Your waifu • {random.choice(['♡','✧','❀','🌸','💕'])}")
+                dm_embed.timestamp = discord.utils.utcnow()
+                dm_msg = await send_to_dm.send(embed=dm_embed, file=dm_file)
+                await dm_msg.add_reaction("❤️")
             except Exception:
                 pass
     except Exception:
         try:
-            await channel.send(greeting_text)
+            msg = await channel.send(greeting_text)
+            await msg.add_reaction("❤️")
         except Exception:
             pass
 
@@ -756,6 +792,7 @@ intents.voice_states = True
 intents.message_content = True
 intents.members = True
 bot = commands.Bot(command_prefix="!", intents=intents)
+bot.session = None
 
 @tasks.loop(seconds=AUTOSAVE_INTERVAL)
 async def autosave_task():
@@ -773,19 +810,28 @@ async def periodic_vc_drop():
             channel = bot.get_channel(VC_CHANNEL_ID)
             if not channel: continue
             try:
-                async with aiohttp.ClientSession() as session:
-                    url, _, _ = await fetch_gif(session)
-                    if url:
-                        image_bytes, content_type = await _download_bytes(session, url)
-                        if image_bytes:
-                            if len(image_bytes) > DISCORD_MAX_UPLOAD:
-                                image_bytes = await compress_image(image_bytes)
+                async with bot.session.get("https://api.waifu.pics/nsfw/waifu") as resp:
+                    if resp.status == 200:
+                        dataj = await resp.json()
+                        url = dataj.get("url")
+                        if url:
+                            image_bytes, _ = await _download_bytes(bot.session, url)
                             if image_bytes and len(image_bytes) <= DISCORD_MAX_UPLOAD:
-                                ext = ".gif" if "gif" in url.lower() or (content_type and "gif" in content_type) else ".jpg"
-                                await channel.send(file=discord.File(io.BytesIO(image_bytes), filename=f"waifu{ext}"))
+                                await channel.send(file=discord.File(io.BytesIO(image_bytes), filename="waifu.jpg"))
             except Exception:
                 pass
             break
+
+@tasks.loop(minutes=15)
+async def status_cycle():
+    statuses = [
+        "watching over you~ 💕",
+        "waiting for your voice...",
+        "feeling lonely without you",
+        "dreaming of soft whispers",
+        "blushing in the corner 🌸"
+    ]
+    await bot.change_presence(activity=discord.Activity(type=discord.ActivityType.watching, name=random.choice(statuses)))
 
 @tasks.loop(seconds=300)
 async def vc_reconnect_heartbeat():
@@ -818,14 +864,22 @@ async def vc_reconnect_heartbeat():
 
 @bot.event
 async def on_ready():
+    global bot
     logger.info(f"Logged in as {bot.user}")
-    for task in (autosave_task, periodic_vc_drop, vc_reconnect_heartbeat):
+    bot.session = aiohttp.ClientSession(timeout=aiohttp.ClientTimeout(total=REQUEST_TIMEOUT))
+    for task in (autosave_task, periodic_vc_drop, vc_reconnect_heartbeat, status_cycle):
         if not task.is_running(): task.start()
     for guild in bot.guilds:
         try:
             await update_vc_position(guild)
         except Exception:
             pass
+    logger.info("✅ Waifu Bot is fully awake and ready~")
+
+@bot.event
+async def on_close():
+    if bot.session:
+        await bot.session.close()
 
 @bot.event
 async def on_voice_state_update(member, before, after):
@@ -844,22 +898,31 @@ async def on_voice_state_update(member, before, after):
 
     if not channel: return
 
-    async with aiohttp.ClientSession() as session:
+    uid = str(member.id)
+    is_first = uid not in data["first_seen"]
+    if is_first and now_monitored:
+        data["first_seen"][uid] = datetime.datetime.now().isoformat()
+
+    async with bot.session:
         if now_monitored and (not was_monitored or before.channel.id != after.channel.id):
-            greeting = random.choice(JOIN_GREETINGS).format(display_name=member.display_name)
-            gif_url, _, _ = await fetch_gif(session, member.id)
+            greeting_list = get_greeting_list(True, is_first)
+            greeting = random.choice(greeting_list).format(display_name=member.display_name)
+            gif_url, _, _ = await fetch_gif(bot.session, member.id)
             if gif_url:
-                await send_greeting_embed(channel, session, greeting, gif_url, member, send_to_dm=member)
+                await send_greeting_embed(channel, bot.session, greeting, gif_url, member, send_to_dm=member)
             else:
-                await channel.send(greeting)
+                msg = await channel.send(greeting)
+                await msg.add_reaction("❤️")
 
         elif was_monitored and not now_monitored:
-            leave_msg = random.choice(LEAVE_GREETINGS).format(display_name=member.display_name)
-            gif_url, _, _ = await fetch_gif(session, member.id)
+            greeting_list = get_greeting_list(False, False)
+            leave_msg = random.choice(greeting_list).format(display_name=member.display_name)
+            gif_url, _, _ = await fetch_gif(bot.session, member.id)
             if gif_url:
-                await send_greeting_embed(channel, session, leave_msg, gif_url, member, send_to_dm=member)
+                await send_greeting_embed(channel, bot.session, leave_msg, gif_url, member, send_to_dm=member)
             else:
-                await channel.send(leave_msg)
+                msg = await channel.send(leave_msg)
+                await msg.add_reaction("❤️")
 
 if not TOKEN:
     logger.error("TOKEN env var is not set.")
