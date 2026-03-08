@@ -1149,29 +1149,6 @@ async def autosave_task():
     except Exception:
         pass
 
-@tasks.loop(seconds=45)
-async def periodic_vc_drop():
-    if not VC_CHANNEL_ID: return
-    for vc_id in VC_IDS:
-        vc = bot.get_channel(vc_id)
-        if not vc or not isinstance(vc, discord.VoiceChannel): continue
-        users = [m for m in vc.members if not m.bot]
-        if len(users) >= 2:
-            channel = bot.get_channel(VC_CHANNEL_ID)
-            if not channel: continue
-            try:
-                url, _, _ = await fetch_gif(bot.http_session)
-                if url:
-                    image_bytes, content_type = await _download_bytes(bot.http_session, url)
-                    if image_bytes:
-                        if len(image_bytes) > DISCORD_MAX_UPLOAD:
-                            image_bytes = await compress_image(image_bytes)
-                        if image_bytes and len(image_bytes) <= DISCORD_MAX_UPLOAD:
-                            ext = ".gif" if "gif" in url.lower() or (content_type and "gif" in content_type) else ".jpg"
-                            await _safe_send(channel, file=discord.File(io.BytesIO(image_bytes), filename=f"waifu{ext}"))
-            except Exception:
-                pass
-            break
 
 @tasks.loop(seconds=300)
 async def vc_reconnect_heartbeat():
@@ -1252,7 +1229,7 @@ async def on_ready():
 
     asyncio.create_task(_keep_alive_server())
 
-    for task in (autosave_task, periodic_vc_drop, vc_reconnect_heartbeat,
+    for task in (autosave_task, vc_reconnect_heartbeat,
                  prefetch_pool_filler, random_mood_drop):
         if not task.is_running():
             task.start()
