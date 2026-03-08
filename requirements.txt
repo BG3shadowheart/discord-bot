@@ -3,3 +3,4 @@ aiohttp>=3.9.5
 flask>=3.0.0
 Pillow>=10.0.0
 PyNaCl
+davey
