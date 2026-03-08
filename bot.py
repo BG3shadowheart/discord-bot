@@ -1,10 +1,7 @@
-from flask import Flask
-from threading import Thread
-import os, sys, io, json, random, hashlib, logging, re, asyncio
+import os, sys, io, json, random, hashlib, logging, re, asyncio, base64, datetime
 import xml.etree.ElementTree as ET
-from urllib.parse import quote_plus
 from collections import deque
-import datetime
+from urllib.parse import quote_plus
 
 import aiohttp
 import discord
@@ -15,48 +12,70 @@ try:
 except Exception:
     Image = None
 
-_flask_app = Flask("")
+# ── Keep-alive server (lightweight asyncio, no Flask) ─────────────────────────
 
-@_flask_app.route("/")
-def _home():
-    return "Bot is alive! 🔥"
-
-def _run_flask():
+async def _keep_alive_server():
+    async def _handle(reader, writer):
+        try:
+            await reader.read(2048)
+            writer.write(
+                b"HTTP/1.1 200 OK\r\n"
+                b"Content-Type: text/plain\r\n"
+                b"Content-Length: 13\r\n"
+                b"Connection: close\r\n"
+                b"\r\n"
+                b"Bot is alive!"
+            )
+            await writer.drain()
+        except Exception:
+            pass
+        finally:
+            try:
+                writer.close()
+                await writer.wait_closed()
+            except Exception:
+                pass
     port = int(os.environ.get("PORT", 10000))
-    _flask_app.run(host="0.0.0.0", port=port)
+    server = await asyncio.start_server(_handle, "0.0.0.0", port)
+    logger.info(f"Keep-alive server listening on port {port}")
+    async with server:
+        await server.serve_forever()
 
-def keep_alive():
-    t = Thread(target=_run_flask, daemon=True)
-    t.start()
+# ── Environment variables ──────────────────────────────────────────────────────
 
 NSFW_MODE = True
 
-TOKEN = os.getenv("TOKEN", "")
-WAIFUIM_API_KEY = os.getenv("WAIFUIM_API_KEY", "")
-DANBOORU_USER = os.getenv("DANBOORU_USER", "")
-DANBOORU_API_KEY = os.getenv("DANBOORU_API_KEY", "")
-GELBOORU_API_KEY = os.getenv("GELBOORU_API_KEY", "")
-GELBOORU_USER = os.getenv("GELBOORU_USER", "")
-E621_USER = os.getenv("E621_USER", "")
-E621_API_KEY = os.getenv("E621_API_KEY", "")
-WAIFU_IT_API_KEY = os.getenv("WAIFU_IT_API_KEY", "")
+TOKEN              = os.getenv("TOKEN", "")
+WAIFUIM_API_KEY    = os.getenv("WAIFUIM_API_KEY", "")
+DANBOORU_USER      = os.getenv("DANBOORU_USER", "")
+DANBOORU_API_KEY   = os.getenv("DANBOORU_API_KEY", "")
+GELBOORU_API_KEY   = os.getenv("GELBOORU_API_KEY", "")
+GELBOORU_USER      = os.getenv("GELBOORU_USER", "")
+E621_USER          = os.getenv("E621_USER", "")
+E621_API_KEY       = os.getenv("E621_API_KEY", "")
+WAIFU_IT_API_KEY   = os.getenv("WAIFU_IT_API_KEY", "")
+BOT_PERSONA        = os.getenv("BOT_PERSONA_NAME", "Yuki")
 
-DEBUG_FETCH = str(os.getenv("DEBUG_FETCH", "")).strip().lower() in ("1","true","yes","on")
-TRUE_RANDOM = str(os.getenv("TRUE_RANDOM", "")).strip().lower() in ("1","true","yes")
-REQUEST_TIMEOUT = int(os.getenv("REQUEST_TIMEOUT", "14"))
-DISCORD_MAX_UPLOAD = int(os.getenv("DISCORD_MAX_UPLOAD", str(8 * 1024 * 1024)))
-HEAD_SIZE_LIMIT = DISCORD_MAX_UPLOAD
-DATA_FILE = os.getenv("DATA_FILE", "data_nsfw.json")
-AUTOSAVE_INTERVAL = int(os.getenv("AUTOSAVE_INTERVAL", "90"))
-FETCH_ATTEMPTS = int(os.getenv("FETCH_ATTEMPTS", "40"))
-MAX_USED_GIFS_PER_USER = int(os.getenv("MAX_USED_GIFS_PER_USER", "300"))
+DEBUG_FETCH            = str(os.getenv("DEBUG_FETCH", "")).strip().lower() in ("1","true","yes","on")
+TRUE_RANDOM            = str(os.getenv("TRUE_RANDOM", "")).strip().lower() in ("1","true","yes")
+REQUEST_TIMEOUT        = int(os.getenv("REQUEST_TIMEOUT", "14"))
+DISCORD_MAX_UPLOAD     = int(os.getenv("DISCORD_MAX_UPLOAD", str(8 * 1024 * 1024)))
+HEAD_SIZE_LIMIT        = DISCORD_MAX_UPLOAD
+DATA_FILE              = os.getenv("DATA_FILE", "data_nsfw.json")
+AUTOSAVE_INTERVAL      = int(os.getenv("AUTOSAVE_INTERVAL", "120"))
+FETCH_ATTEMPTS         = int(os.getenv("FETCH_ATTEMPTS", "40"))
+MAX_USED_GIFS_PER_USER = int(os.getenv("MAX_USED_GIFS_PER_USER", "1000"))
 
 VC_CHANNEL_ID = int(os.getenv("VC_CHANNEL_ID", "0"))
-_VC_IDS_RAW = os.getenv("VC_IDS", "")
-VC_IDS = [int(x.strip()) for x in _VC_IDS_RAW.split(",") if x.strip().isdigit()] if _VC_IDS_RAW.strip() else []
+_VC_IDS_RAW   = os.getenv("VC_IDS", "")
+VC_IDS        = [int(x.strip()) for x in _VC_IDS_RAW.split(",") if x.strip().isdigit()] if _VC_IDS_RAW.strip() else []
 
-logging.basicConfig(level=logging.DEBUG if DEBUG_FETCH else logging.INFO,
-                    format="%(asctime)s [%(levelname)s] %(name)s: %(message)s")
+# ── Logging ────────────────────────────────────────────────────────────────────
+
+logging.basicConfig(
+    level=logging.DEBUG if DEBUG_FETCH else logging.INFO,
+    format="%(asctime)s [%(levelname)s] %(name)s: %(message)s"
+)
 logger = logging.getLogger("waifu-bot")
 
 if not VC_IDS:
@@ -64,30 +83,92 @@ if not VC_IDS:
 if not VC_CHANNEL_ID:
     logger.warning("[VC] VC_CHANNEL_ID env var not set — text channel messages disabled.")
 
+# ── Data persistence ───────────────────────────────────────────────────────────
+
 if not os.path.exists(DATA_FILE):
     with open(DATA_FILE, "w") as f:
-        json.dump({"sent_history": {}, "vc_state": {}, "first_seen": {}}, f, indent=2)
+        json.dump({
+            "sent_history": {}, "vc_state": {},
+            "greeted_users": [], "visit_count": {},
+            "last_daily_open": "", "user_tiers": {},
+        }, f, indent=2)
 
 with open(DATA_FILE, "r") as f:
-    data = json.load(f)
+    _raw = json.load(f)
 
-data.setdefault("sent_history", {})
-data.setdefault("vc_state", {})
-data.setdefault("first_seen", {})
+data = {
+    "sent_history": {
+        uid: deque(h, maxlen=MAX_USED_GIFS_PER_USER)
+        for uid, h in _raw.get("sent_history", {}).items()
+    },
+    "vc_state":        _raw.get("vc_state", {}),
+    "greeted_users":   _raw.get("greeted_users", []),
+    "visit_count":     _raw.get("visit_count", {}),
+    "last_daily_open": _raw.get("last_daily_open", ""),
+    "user_tiers":      _raw.get("user_tiers", {}),
+}
 
-last_save_time = 0
+def _write_json(payload):
+    with open(DATA_FILE, "w") as f:
+        json.dump(payload, f, indent=2)
 
-def save_data():
-    global last_save_time
-    now = datetime.datetime.now().timestamp()
-    if now - last_save_time < 5:
-        return
-    last_save_time = now
+async def save_data():
     try:
-        with open(DATA_FILE, "w") as f:
-            json.dump(data, f, indent=2)
+        serializable = {
+            "sent_history":    {uid: list(h) for uid, h in data["sent_history"].items()},
+            "vc_state":        data["vc_state"],
+            "greeted_users":   data["greeted_users"],
+            "visit_count":     data["visit_count"],
+            "last_daily_open": data["last_daily_open"],
+            "user_tiers":      data["user_tiers"],
+        }
+        await asyncio.to_thread(_write_json, serializable)
     except Exception as e:
         logger.warning(f"Save failed: {e}")
+
+# ── Image utilities ────────────────────────────────────────────────────────────
+
+async def _download_bytes(session, url, size_limit=HEAD_SIZE_LIMIT, timeout=REQUEST_TIMEOUT):
+    try:
+        to = aiohttp.ClientTimeout(total=timeout)
+        async with session.get(url, timeout=to, allow_redirects=True) as resp:
+            if resp.status != 200:
+                return None, None
+            ctype = resp.content_type or ""
+            total, chunks = 0, []
+            async for chunk in resp.content.iter_chunked(1024):
+                chunks.append(chunk)
+                total += len(chunk)
+                if total > size_limit:
+                    return None, ctype
+            return b"".join(chunks), ctype
+    except Exception:
+        return None, None
+
+def _compress_image_sync(image_bytes, target_size):
+    try:
+        img = Image.open(io.BytesIO(image_bytes))
+        if img.format == "GIF":
+            return image_bytes
+        output = io.BytesIO()
+        quality = 95
+        while quality > 10:
+            output.seek(0)
+            output.truncate()
+            img.save(output, format=img.format or "JPEG", quality=quality, optimize=True)
+            if output.tell() <= target_size:
+                return output.getvalue()
+            quality -= 10
+        return output.getvalue()
+    except Exception:
+        return image_bytes
+
+async def compress_image(image_bytes, target_size=DISCORD_MAX_UPLOAD):
+    if not Image:
+        return image_bytes
+    return await asyncio.to_thread(_compress_image_sync, image_bytes, target_size)
+
+# ── API provider tag lists ─────────────────────────────────────────────────────
 
 SPICY_TAGS = [
     "ahegao", "creampie", "cum_inside", "gangbang", "double_penetration",
@@ -112,38 +193,7 @@ _seed_gif_tags = [
 
 GIF_TAGS = list(dict.fromkeys(_seed_gif_tags))
 
-async def _download_bytes(session, url, size_limit=HEAD_SIZE_LIMIT, timeout=REQUEST_TIMEOUT):
-    try:
-        to = aiohttp.ClientTimeout(total=timeout)
-        async with session.get(url, timeout=to, allow_redirects=True) as resp:
-            if resp.status != 200:
-                return None, None
-            ctype = resp.content_type or ""
-            total, chunks = 0, []
-            async for chunk in resp.content.iter_chunked(1024):
-                chunks.append(chunk)
-                total += len(chunk)
-                if total > size_limit:
-                    return None, ctype
-            return b"".join(chunks), ctype
-    except Exception:
-        return None, None
-
-async def compress_image(image_bytes, target_size=DISCORD_MAX_UPLOAD):
-    if not Image: return image_bytes
-    try:
-        img = Image.open(io.BytesIO(image_bytes))
-        if img.format == "GIF": return image_bytes
-        output = io.BytesIO()
-        quality = 85
-        while quality > 10:
-            output.seek(0); output.truncate()
-            img.save(output, format=img.format or "JPEG", quality=quality, optimize=True, progressive=True)
-            if output.tell() <= target_size: return output.getvalue()
-            quality -= 10
-        return output.getvalue()
-    except Exception:
-        return image_bytes
+# ── API provider functions ─────────────────────────────────────────────────────
 
 async def _gelbooru_compat(session, base_url, api_key=None, user_id=None, extra_tags=None):
     try:
@@ -199,7 +249,10 @@ async def fetch_rule34(session, positive=None):
         return None, None, None
 
 async def fetch_gelbooru(session, positive=None):
-    url, _, post = await _gelbooru_compat(session, "https://gelbooru.com/index.php", GELBOORU_API_KEY or None, GELBOORU_USER or None)
+    url, _, post = await _gelbooru_compat(
+        session, "https://gelbooru.com/index.php",
+        GELBOORU_API_KEY or None, GELBOORU_USER or None
+    )
     return url, "gelbooru", post
 
 async def fetch_nekosapi(session, positive=None):
@@ -230,7 +283,10 @@ async def fetch_konachan(session, positive=None):
             if resp.status != 200: return None, None, None
             posts = await resp.json(content_type=None)
             if not posts: return None, None, None
-            image_posts = [p for p in posts if p.get("file_url") and not p.get("file_url", "").lower().endswith((".webm", ".mp4"))]
+            image_posts = [
+                p for p in posts
+                if p.get("file_url") and not p.get("file_url", "").lower().endswith((".webm", ".mp4"))
+            ]
             if not image_posts: return None, None, None
             post = random.choice(image_posts)
             return post.get("file_url"), "konachan", post
@@ -255,13 +311,9 @@ async def fetch_danbooru(session, positive=None):
         if random.random() < 0.85: tags.append(random.choice(SPICY_TAGS))
         if random.random() < 0.60: tags.append("animated")
         params = {"tags": " ".join(tags), "limit": 20, "random": "true"}
-        headers = {}
-        if DANBOORU_USER and DANBOORU_API_KEY:
-            import base64
-            creds = base64.b64encode(f"{DANBOORU_USER}:{DANBOORU_API_KEY}".encode()).decode()
-            headers["Authorization"] = f"Basic {creds}"
+        auth = aiohttp.BasicAuth(DANBOORU_USER, DANBOORU_API_KEY) if (DANBOORU_USER and DANBOORU_API_KEY) else None
         to = aiohttp.ClientTimeout(total=REQUEST_TIMEOUT)
-        async with session.get("https://danbooru.donmai.us/posts.json", params=params, headers=headers or None, timeout=to) as resp:
+        async with session.get("https://danbooru.donmai.us/posts.json", params=params, auth=auth, timeout=to) as resp:
             if resp.status != 200: return None, None, None
             posts = await resp.json(content_type=None)
             if not posts: return None, None, None
@@ -320,7 +372,10 @@ async def fetch_paheal(session, positive=None):
         params = {"tags": tag, "limit": 50}
         hdrs = {"User-Agent": "WaifuBot/1.0"}
         to = aiohttp.ClientTimeout(total=REQUEST_TIMEOUT)
-        async with session.get("https://rule34.paheal.net/api/danbooru/find_posts/index.xml", params=params, headers=hdrs, timeout=to) as resp:
+        async with session.get(
+            "https://rule34.paheal.net/api/danbooru/find_posts/index.xml",
+            params=params, headers=hdrs, timeout=to
+        ) as resp:
             if resp.status != 200: return None, None, None
             text = await resp.text()
             root = ET.fromstring(text)
@@ -351,7 +406,10 @@ async def fetch_nekos_moe(session, positive=None):
     try:
         hdrs = {"User-Agent": "WaifuBot/1.0"}
         to = aiohttp.ClientTimeout(total=REQUEST_TIMEOUT)
-        async with session.get("https://nekos.moe/api/v1/random/image?nsfw=true&count=1", headers=hdrs, timeout=to) as resp:
+        async with session.get(
+            "https://nekos.moe/api/v1/random/image?nsfw=true&count=1",
+            headers=hdrs, timeout=to
+        ) as resp:
             if resp.status != 200: return None, None, None
             payload = await resp.json(content_type=None)
             images = payload.get("images", [])
@@ -387,7 +445,10 @@ async def fetch_e621(session, positive=None):
             payload = await resp.json(content_type=None)
             posts = payload.get("posts", [])
             if not posts: return None, None, None
-            image_posts = [p for p in posts if p.get("file", {}).get("ext") in ("jpg","jpeg","png","gif","webp")]
+            image_posts = [
+                p for p in posts
+                if p.get("file", {}).get("ext") in ("jpg", "jpeg", "png", "gif", "webp")
+            ]
             if not image_posts: return None, None, None
             post = random.choice(image_posts)
             gif_url = post.get("file", {}).get("url")
@@ -407,7 +468,10 @@ async def fetch_yandere(session, positive=None):
             if resp.status != 200: return None, None, None
             posts = await resp.json(content_type=None)
             if not posts: return None, None, None
-            image_posts = [p for p in posts if p.get("file_url") and not p.get("file_url", "").lower().endswith((".webm", ".mp4"))]
+            image_posts = [
+                p for p in posts
+                if p.get("file_url") and not p.get("file_url", "").lower().endswith((".webm", ".mp4"))
+            ]
             if not image_posts: return None, None, None
             post = random.choice(image_posts)
             return post.get("file_url"), "yandere", post
@@ -418,66 +482,163 @@ async def fetch_hypnohub(session, positive=None):
     url, _, post = await _gelbooru_compat(session, "https://hypnohub.net/index.php")
     return url, "hypnohub", post
 
+# ── Provider list & health tracking ───────────────────────────────────────────
+
 _BASE_PROVIDERS = [
-    ("rule34", fetch_rule34, 45),
-    ("gelbooru", fetch_gelbooru, 18),
-    ("nekosapi", fetch_nekosapi, 15),
-    ("konachan", fetch_konachan, 12),
-    ("nekobot", fetch_nekobot, 10),
-    ("danbooru", fetch_danbooru, 8),
-    ("nekos_life", fetch_nekos_life, 8),
-    ("tbib", fetch_tbib, 7),
-    ("xbooru", fetch_xbooru, 7),
-    ("realbooru", fetch_realbooru, 6),
-    ("waifu_im", fetch_waifu_im, 5),
-    ("paheal", fetch_paheal, 5),
-    ("waifu_it", fetch_waifu_it, 4),
-    ("nekos_moe", fetch_nekos_moe, 3),
-    ("waifu_pics", fetch_waifu_pics, 2),
+    ("rule34",     fetch_rule34,     45),
+    ("gelbooru",   fetch_gelbooru,   18),
+    ("nekosapi",   fetch_nekosapi,   15),
+    ("konachan",   fetch_konachan,   12),
+    ("nekobot",    fetch_nekobot,    10),
+    ("danbooru",   fetch_danbooru,    8),
+    ("nekos_life", fetch_nekos_life,  8),
+    ("tbib",       fetch_tbib,        7),
+    ("xbooru",     fetch_xbooru,      7),
+    ("realbooru",  fetch_realbooru,   6),
+    ("waifu_im",   fetch_waifu_im,    5),
+    ("paheal",     fetch_paheal,      5),
+    ("waifu_it",   fetch_waifu_it,    4),
+    ("nekos_moe",  fetch_nekos_moe,   3),
+    ("waifu_pics", fetch_waifu_pics,  2),
 ]
 
 _NSFW_EXTRA_PROVIDERS = [
-    ("e621", fetch_e621, 18),
-    ("yandere", fetch_yandere, 14),
-    ("hypnohub", fetch_hypnohub, 6),
+    ("e621",     fetch_e621,     18),
+    ("yandere",  fetch_yandere,  14),
+    ("hypnohub", fetch_hypnohub,  6),
 ]
 
 PROVIDERS = _BASE_PROVIDERS + _NSFW_EXTRA_PROVIDERS
+
+_provider_failures  = {}
+_provider_last_used = {}
+_PROVIDER_RATE_GAPS = {"danbooru": 1.0, "e621": 1.0, "gelbooru": 0.5}
+_PROVIDER_FAIL_LIMIT = 5
 
 def _hash_url(url):
     return hashlib.md5(url.encode()).hexdigest()
 
 def _choose_provider():
-    if TRUE_RANDOM: return random.choice(PROVIDERS)
-    weights = [w for _, _, w in PROVIDERS]
-    return random.choices(PROVIDERS, weights=weights, k=1)[0]
+    if TRUE_RANDOM:
+        return random.choice(PROVIDERS)
+    eligible = [
+        (n, f, w) for n, f, w in PROVIDERS
+        if _provider_failures.get(n, 0) < _PROVIDER_FAIL_LIMIT
+    ]
+    if not eligible:
+        _provider_failures.clear()
+        eligible = PROVIDERS
+    weights = [w for _, _, w in eligible]
+    return random.choices(eligible, weights=weights, k=1)[0]
 
 async def _fetch_one(session, used_hashes=None):
-    if used_hashes is None: used_hashes = set()
+    if used_hashes is None:
+        used_hashes = set()
     name, fetch_func, _ = _choose_provider()
+    gap = _PROVIDER_RATE_GAPS.get(name, 0)
+    if gap:
+        last = _provider_last_used.get(name, 0)
+        now  = asyncio.get_event_loop().time()
+        wait = gap - (now - last)
+        if wait > 0:
+            await asyncio.sleep(wait)
+    _provider_last_used[name] = asyncio.get_event_loop().time()
     try:
         url, source, meta = await fetch_func(session)
         if url:
             h = _hash_url(url)
             if h not in used_hashes:
+                _provider_failures[name] = 0
                 return url, source, meta, h
+        _provider_failures[name] = _provider_failures.get(name, 0) + 1
     except Exception:
-        pass
+        _provider_failures[name] = _provider_failures.get(name, 0) + 1
     return None, None, None, None
 
 async def fetch_gif(session, user_id=None):
-    uid = str(user_id) if user_id else "global"
-    if uid not in data["sent_history"]:
-        data["sent_history"][uid] = deque(maxlen=MAX_USED_GIFS_PER_USER)
-    history = data["sent_history"][uid]
-    used = set(history)
-    for _ in range(FETCH_ATTEMPTS):
-        url, source, meta, url_hash = await _fetch_one(session, used)
-        if url:
-            history.append(url_hash)
-            data["sent_history"][uid] = history
-            return url, source, meta
+    uid     = str(user_id) if user_id else "global"
+    history = data["sent_history"].setdefault(uid, deque(maxlen=MAX_USED_GIFS_PER_USER))
+    used    = set(history)
+    rounds  = max(1, FETCH_ATTEMPTS // 3)
+    for _ in range(rounds):
+        tasks_list = [_fetch_one(session, used) for _ in range(3)]
+        results    = await asyncio.gather(*tasks_list, return_exceptions=True)
+        for res in results:
+            if isinstance(res, tuple) and res[0]:
+                url, source, meta, url_hash = res
+                history.append(url_hash)
+                data["sent_history"][uid] = history
+                return url, source, meta
     return None, None, None
+
+# ── Greeting text pools ────────────────────────────────────────────────────────
+
+FIRST_TIME_GREETINGS = [
+    "🎌 **{display_name}** steps into the spotlight for the very first time. We've been waiting.",
+    "✨ A new soul enters — **{display_name}**, the prologue just became a story.",
+    "👁️ **{display_name}** arrives for the first time. The room won't forget this.",
+    "🌸 **{display_name}** joins us for the first time — welcome to your new obsession.",
+    "🔮 **{display_name}** appears. First entries are always the ones that matter most.",
+    "🎴 **{display_name}** — a new card dealt. The game just changed.",
+    "🌺 A new presence blooms: **{display_name}**. First impressions are the deepest.",
+    "⛩️ The gates open for **{display_name}** for the very first time. Step through.",
+]
+
+TIERS = ["shadow", "flame", "frost", "bloom", "storm"]
+
+TIER_LABELS = {
+    "shadow": "🌑 Shadow",
+    "flame":  "🔥 Flame",
+    "frost":  "🧊 Frost",
+    "bloom":  "🌸 Bloom",
+    "storm":  "⚡ Storm",
+}
+
+TIER_FIRST_GREETINGS = {
+    "shadow": "🌑 **{display_name}** — the shadow faction claims its own. Welcome to the dark.",
+    "flame":  "🔥 **{display_name}** — the flame court rises. Burn bright, burn long.",
+    "frost":  "🧊 **{display_name}** — cold, precise, and inevitable. The frost welcomes you.",
+    "bloom":  "🌸 **{display_name}** — rare beauty, quiet danger. The bloom recognizes you.",
+    "storm":  "⚡ **{display_name}** — the weather just became a warning. Storm faction, rise.",
+}
+
+MILESTONE_GREETINGS = [
+    "🔥 **{display_name}** is back for visit #{count}. A true regular. The room noticed.",
+    "👑 **{display_name}** returns again — #{count}. The throne is yours. Sit.",
+    "🖤 **{display_name}** visit #{count}. Some presences become permanent. You're one of them.",
+    "⚡ **{display_name}** — #{count} times through these doors. Electric as always.",
+    "🌙 **{display_name}** #{count}. The night keeps track even when you don't.",
+]
+
+THEMED_JOINS = {
+    "midnight": [
+        "🌑 {display_name} crept in past midnight — the darkest hours are the most honest.",
+        "🕯️ {display_name} arrived while everyone sleeps. The night belongs to you both.",
+        "🌙 {display_name} showed up at midnight. Some invitations aren't spoken aloud.",
+        "🖤 {display_name} joins the midnight crowd — awake when the world forgets to watch.",
+        "🌌 {display_name} drifted in under starless dark. Something about them fits.",
+    ],
+    "morning": [
+        "☀️ {display_name} is here early — the ambitious ones always are.",
+        "🍵 {display_name} arrived with the morning light. First one in, boldest one here.",
+        "🌅 {display_name} stepped in at dawn. The day just got more interesting.",
+        "☕ {display_name} arrived before the world woke up. Respect.",
+        "🌤️ {display_name} joins with the morning — fresh and already dangerous.",
+    ],
+    "afternoon": [
+        "🌤️ {display_name} arrived — the afternoon shift just got dangerous.",
+        "☕ {display_name} showed up midday. Energy high, patience short.",
+        "🌞 {display_name} joins at peak hours — the sharpest one in the room.",
+        "🍃 {display_name} steps in with the afternoon breeze. Casual but noticed.",
+    ],
+    "evening": [
+        "🌆 {display_name} arrived as the sun drops. Evening energy hits different.",
+        "🍷 {display_name} joined at dusk — every good story starts now.",
+        "🌇 {display_name} stepped in with golden hour. The best part of the day just started.",
+        "🕯️ {display_name} arrives as the lights go warm. Perfect timing.",
+        "🌃 {display_name} joined with the evening crowd. The room shifts gear.",
+    ],
+}
 
 JOIN_GREETINGS = [
     "💋 {display_name} slips in like a slow caress — the room just warmed up.",
@@ -663,70 +824,252 @@ LEAVE_GREETINGS = [
     "🐍 {display_name} coiled away into the dark. Until next time.",
 ]
 
-SPECIAL_FIRST_JOIN = [
-    "💖 Oh... {display_name}... this is your first time here? My heart is racing~ Welcome home, darling.",
-    "🌸 {display_name}... I've been waiting for you. First time in my room? Let me make it unforgettable.",
-    "✨ {display_name} stepped in for the first time... the air feels different now. Welcome, my special one.",
-    "🔥 First time, {display_name}? My cheeks are burning... come closer, let me show you around.",
+MOOD_MESSAGES = [
+    "🌙 *The room hums with something unspoken tonight.*",
+    "👁️ *Someone is definitely watching. That's not necessarily bad.*",
+    "🕯️ *The candles burn a little lower when everyone's here.*",
+    "🌑 *Something shifted. The air knows.*",
+    "🎶 *A song no one remembers the name of starts playing.*",
+    "🖤 *The dark is comfortable here. Stay a while.*",
+    "🌌 *The void acknowledged you. You may not have noticed.*",
+    "🐍 *Patience is a form of power. Just saying.*",
+    "⚡ *Static in the air. Nobody made it — it just formed.*",
+    "🌺 *Something beautiful and slightly dangerous is happening right now.*",
+    "🔮 *The future is reading the room. What it sees is interesting.*",
+    "🥀 *Even wilted things carry a scent. Remember that.*",
 ]
 
-def get_greeting_list(is_join: bool, is_first: bool):
-    hour = datetime.datetime.now().hour
-    if is_first and is_join:
-        return SPECIAL_FIRST_JOIN
-    if 0 <= hour < 6:
-        return [g for g in (JOIN_GREETINGS if is_join else LEAVE_GREETINGS) if "🌙" in g or "🌑" in g or "🌒" in g][:15] or (JOIN_GREETINGS if is_join else LEAVE_GREETINGS)
-    if 6 <= hour < 12:
-        return [g for g in (JOIN_GREETINGS if is_join else LEAVE_GREETINGS) if "🌸" in g or "🌺" in g][:15] or (JOIN_GREETINGS if is_join else LEAVE_GREETINGS)
-    return JOIN_GREETINGS if is_join else LEAVE_GREETINGS
+DAILY_OPENERS = [
+    "🌅 *A new day begins. The room opens its eyes.*",
+    "🎌 *The gates are open. Who arrives first sets the tone.*",
+    "🌒 *Another cycle, another cast of characters. Welcome back.*",
+    "⛩️ *The channel wakes. Something is already stirring.*",
+    "🌸 *Day begins. The air is still. Not for long.*",
+]
 
-async def send_greeting_embed(channel, session, greeting_text, image_url, member, send_to_dm=None):
+# ── Embed configuration ────────────────────────────────────────────────────────
+
+JOIN_EMBED_COLORS = [
+    discord.Color.from_rgb(220, 53, 69),
+    discord.Color.from_rgb(123, 44, 191),
+    discord.Color.from_rgb(255, 159, 28),
+    discord.Color.from_rgb(220, 53, 128),
+    discord.Color.from_rgb(180, 30, 60),
+]
+
+LEAVE_EMBED_COLORS = [
+    discord.Color.from_rgb(60, 60, 90),
+    discord.Color.from_rgb(40, 40, 70),
+    discord.Color.from_rgb(80, 50, 100),
+    discord.Color.from_rgb(30, 50, 80),
+]
+
+JOIN_TITLES = [
+    "⛩️ Voice Channel Arrival",
+    "🎌 New Presence Detected",
+    "🌙 The Room Shifts",
+    "👁️ Arrival Noted",
+    "🔮 A Soul Enters",
+    "🌑 The Dark Acknowledges",
+    "🕯️ The Flame Rises",
+    "✨ Presence: Confirmed",
+]
+
+LEAVE_TITLES = [
+    "🌙 They Slipped Away",
+    "🖤 Departure Noted",
+    "🌑 The Room Exhales",
+    "🕯️ The Flame Lowers",
+    "🌫️ Gone Like Smoke",
+    "👁️ One Less Watcher",
+]
+
+FOOTER_LINES = [
+    f"{BOT_PERSONA} noticed you  🖤",
+    "presence detected — system unstable",
+    "another soul joins the chaos",
+    "logged, archived, adored  ❤️",
+    "the void welcomed you",
+    f"𝑤𝑎𝑡𝑐ℎ𝑒𝑑 𝑏𝑦 {BOT_PERSONA}",
+    "𝑝𝑟𝑒𝑠𝑒𝑛𝑐𝑒 𝑖𝑠 𝑒𝑣𝑒𝑟𝑦𝑡ℎ𝑖𝑛𝑔",
+    "the room remembers  🌙",
+]
+
+LEAVE_FOOTER_LINES = [
+    f"{BOT_PERSONA} watched them leave  🖤",
+    "𝑡ℎ𝑒𝑦'𝑙𝑙 𝑏𝑒 𝑏𝑎𝑐𝑘",
+    "departure archived  🌙",
+    "absence noted — warmth remains",
+    "𝑡ℎ𝑒 𝑟𝑜𝑜𝑚 𝑟𝑒𝑚𝑒𝑚𝑏𝑒𝑟𝑠",
+]
+
+JOIN_REACTIONS  = ["🖤", "👁️", "🔥", "✨", "💫", "🌙", "😈", "👑", "🥀", "⚡", "🎌", "🌸"]
+LEAVE_REACTIONS = ["🌙", "🖤", "💫", "🌑", "🕯️", "🌺", "🎶", "🌌"]
+
+# ── Greeting helpers ───────────────────────────────────────────────────────────
+
+def _get_time_theme():
+    hour = datetime.datetime.utcnow().hour
+    if   0 <= hour < 6:   return "midnight"
+    elif 6 <= hour < 12:  return "morning"
+    elif 12 <= hour < 18: return "afternoon"
+    else:                  return "evening"
+
+def get_join_greeting(member):
+    uid   = str(member.id)
+    name  = member.display_name
+    count = data["visit_count"].get(uid, 0) + 1
+    data["visit_count"][uid] = count
+
+    is_first = uid not in data["greeted_users"]
+    if is_first:
+        data["greeted_users"].append(uid)
+        tier = random.choice(TIERS)
+        data["user_tiers"][uid] = tier
+        return TIER_FIRST_GREETINGS[tier].format(display_name=name)
+
+    if count % 10 == 0 or count % 5 == 0:
+        return random.choice(MILESTONE_GREETINGS).format(display_name=name, count=count)
+
+    theme = _get_time_theme()
+    pool  = THEMED_JOINS.get(theme, []) + JOIN_GREETINGS
+    return random.choice(pool).format(display_name=name)
+
+def get_leave_greeting(display_name):
+    return random.choice(LEAVE_GREETINGS).format(display_name=display_name)
+
+async def maybe_send_daily_open(channel):
+    today = datetime.date.today().isoformat()
+    if data["last_daily_open"] == today:
+        return
+    data["last_daily_open"] = today
     try:
-        image_bytes, content_type = await _download_bytes(session, image_url)
+        await channel.send(random.choice(DAILY_OPENERS))
+    except Exception:
+        pass
+
+def _is_late_night():
+    return 0 <= datetime.datetime.utcnow().hour < 5
+
+# ── Safe send with retry ───────────────────────────────────────────────────────
+
+async def _safe_send(channel, **kwargs):
+    for attempt in range(2):
+        try:
+            return await channel.send(**kwargs)
+        except discord.HTTPException as e:
+            if e.status == 429:
+                retry_after = getattr(e, "retry_after", 2)
+                await asyncio.sleep(retry_after + 0.5)
+            elif attempt == 0:
+                await asyncio.sleep(1)
+            else:
+                raise
+    return None
+
+# ── Embed sender ───────────────────────────────────────────────────────────────
+
+async def send_greeting_embed(channel, session, greeting_text, image_url, member,
+                               send_to_dm=None, event_type="join"):
+    try:
+        # Try pre-fetched pool first for instant sends
+        image_bytes, content_type = None, None
+        if _image_pool is not None and not _image_pool.empty():
+            try:
+                pool_url, image_bytes, content_type = _image_pool.get_nowait()
+                image_url = pool_url
+            except asyncio.QueueEmpty:
+                pass
+
+        if image_bytes is None:
+            image_bytes, content_type = await _download_bytes(session, image_url)
+
         if image_bytes and len(image_bytes) > DISCORD_MAX_UPLOAD:
             image_bytes = await compress_image(image_bytes)
         if not image_bytes or len(image_bytes) > DISCORD_MAX_UPLOAD:
-            msg = await channel.send(greeting_text)
-            await msg.add_reaction("❤️")
+            await _safe_send(channel, content=greeting_text)
             return
 
-        lurl = image_url.lower()
+        lurl  = image_url.lower()
         ctype = content_type or ""
-        ext = ".gif" if "gif" in lurl or "gif" in ctype else ".jpg"
-        if "png" in lurl or "png" in ctype: ext = ".png"
+        ext   = ".gif" if ("gif" in lurl or "gif" in ctype) else ".jpg"
+        if "png"  in lurl or "png"  in ctype: ext = ".png"
         elif "webp" in lurl or "webp" in ctype: ext = ".webp"
-
         filename = f"waifu{ext}"
 
+        if event_type == "join":
+            color    = random.choice(JOIN_EMBED_COLORS)
+            title    = random.choice(JOIN_TITLES)
+            footer   = random.choice(FOOTER_LINES)
+            reaction = random.choice(JOIN_REACTIONS)
+        else:
+            color    = random.choice(LEAVE_EMBED_COLORS)
+            title    = random.choice(LEAVE_TITLES)
+            footer   = random.choice(LEAVE_FOOTER_LINES)
+            reaction = random.choice(LEAVE_REACTIONS)
+
+        if _is_late_night():
+            color  = discord.Color.from_rgb(10, 10, 20)
+            footer = f"𝑙𝑎𝑡𝑒 𝑛𝑖𝑔ℎ𝑡. {BOT_PERSONA} 𝑖𝑠 𝑠𝑡𝑖𝑙𝑙 𝑤𝑎𝑡𝑐ℎ𝑖𝑛𝑔  🌑"
+
+        uid  = str(member.id)
+        tier = data["user_tiers"].get(uid)
+        if tier:
+            footer = f"{footer}  ·  {TIER_LABELS[tier]}"
+
+        embed = discord.Embed(
+            title=title,
+            description=greeting_text,
+            color=color,
+            timestamp=datetime.datetime.utcnow(),
+        )
+        embed.set_author(
+            name=member.display_name,
+            icon_url=getattr(member.display_avatar, "url", None),
+        )
+        embed.set_image(url=f"attachment://{filename}")
+        embed.set_footer(
+            text=footer,
+            icon_url=getattr(member.display_avatar, "url", None),
+        )
+
         ch_file = discord.File(io.BytesIO(image_bytes), filename=filename)
-        hue = random.random()
-        color = discord.Color.from_hsv(hue, 0.85, 0.98)
-        ch_embed = discord.Embed(description=greeting_text, color=color)
-        ch_embed.set_author(name=f"💖 {member.display_name}", icon_url=getattr(member.display_avatar, "url", None))
-        ch_embed.set_image(url=f"attachment://{filename}")
-        ch_embed.set_footer(text=f"~ Your waifu • {random.choice(['♡','✧','❀','🌸','💕'])}")
-        ch_embed.timestamp = discord.utils.utcnow()
-        msg = await channel.send(embed=ch_embed, file=ch_file)
-        await msg.add_reaction("❤️")
+        msg = await _safe_send(channel, embed=embed, file=ch_file)
+        if msg:
+            try:
+                await msg.add_reaction(reaction)
+            except Exception:
+                pass
 
         if send_to_dm:
             try:
-                dm_file = discord.File(io.BytesIO(image_bytes), filename=filename)
-                dm_embed = discord.Embed(description=greeting_text, color=color)
-                dm_embed.set_author(name=f"💖 {member.display_name}", icon_url=getattr(member.display_avatar, "url", None))
+                dm_file  = discord.File(io.BytesIO(image_bytes), filename=filename)
+                dm_embed = discord.Embed(
+                    title=title,
+                    description=greeting_text,
+                    color=color,
+                    timestamp=datetime.datetime.utcnow(),
+                )
+                dm_embed.set_author(
+                    name=member.display_name,
+                    icon_url=getattr(member.display_avatar, "url", None),
+                )
                 dm_embed.set_image(url=f"attachment://{filename}")
-                dm_embed.set_footer(text=f"~ Your waifu • {random.choice(['♡','✧','❀','🌸','💕'])}")
-                dm_embed.timestamp = discord.utils.utcnow()
-                dm_msg = await send_to_dm.send(embed=dm_embed, file=dm_file)
-                await dm_msg.add_reaction("❤️")
+                dm_embed.set_footer(
+                    text=footer,
+                    icon_url=getattr(member.display_avatar, "url", None),
+                )
+                await send_to_dm.send(embed=dm_embed, file=dm_file)
             except Exception:
                 pass
+
     except Exception:
         try:
-            msg = await channel.send(greeting_text)
-            await msg.add_reaction("❤️")
+            await _safe_send(channel, content=greeting_text)
         except Exception:
             pass
+
+# ── Voice channel utilities ────────────────────────────────────────────────────
 
 def get_vcs_with_users(guild):
     out = []
@@ -787,17 +1130,24 @@ async def update_vc_position(guild, target_channel=None):
                 continue
     return None
 
+# ── Bot setup ──────────────────────────────────────────────────────────────────
+
 intents = discord.Intents.default()
-intents.voice_states = True
+intents.voice_states    = True
 intents.message_content = True
-intents.members = True
+intents.members         = True
 bot = commands.Bot(command_prefix="!", intents=intents)
-bot.session = None
+
+_image_pool = None  # asyncio.Queue — initialized in on_ready
+
+# ── Background tasks ───────────────────────────────────────────────────────────
 
 @tasks.loop(seconds=AUTOSAVE_INTERVAL)
 async def autosave_task():
-    try: save_data()
-    except Exception: pass
+    try:
+        await save_data()
+    except Exception:
+        pass
 
 @tasks.loop(seconds=45)
 async def periodic_vc_drop():
@@ -810,28 +1160,18 @@ async def periodic_vc_drop():
             channel = bot.get_channel(VC_CHANNEL_ID)
             if not channel: continue
             try:
-                async with bot.session.get("https://api.waifu.pics/nsfw/waifu") as resp:
-                    if resp.status == 200:
-                        dataj = await resp.json()
-                        url = dataj.get("url")
-                        if url:
-                            image_bytes, _ = await _download_bytes(bot.session, url)
-                            if image_bytes and len(image_bytes) <= DISCORD_MAX_UPLOAD:
-                                await channel.send(file=discord.File(io.BytesIO(image_bytes), filename="waifu.jpg"))
+                url, _, _ = await fetch_gif(bot.http_session)
+                if url:
+                    image_bytes, content_type = await _download_bytes(bot.http_session, url)
+                    if image_bytes:
+                        if len(image_bytes) > DISCORD_MAX_UPLOAD:
+                            image_bytes = await compress_image(image_bytes)
+                        if image_bytes and len(image_bytes) <= DISCORD_MAX_UPLOAD:
+                            ext = ".gif" if "gif" in url.lower() or (content_type and "gif" in content_type) else ".jpg"
+                            await _safe_send(channel, file=discord.File(io.BytesIO(image_bytes), filename=f"waifu{ext}"))
             except Exception:
                 pass
             break
-
-@tasks.loop(minutes=15)
-async def status_cycle():
-    statuses = [
-        "watching over you~ 💕",
-        "waiting for your voice...",
-        "feeling lonely without you",
-        "dreaming of soft whispers",
-        "blushing in the corner 🌸"
-    ]
-    await bot.change_presence(activity=discord.Activity(type=discord.ActivityType.watching, name=random.choice(statuses)))
 
 @tasks.loop(seconds=300)
 async def vc_reconnect_heartbeat():
@@ -862,33 +1202,84 @@ async def vc_reconnect_heartbeat():
         except Exception:
             pass
 
+@tasks.loop(seconds=20)
+async def prefetch_pool_filler():
+    if _image_pool is None: return
+    if _image_pool.qsize() >= 4: return
+    try:
+        url, _, _ = await fetch_gif(bot.http_session)
+        if url:
+            image_bytes, ctype = await _download_bytes(bot.http_session, url)
+            if image_bytes and len(image_bytes) <= DISCORD_MAX_UPLOAD:
+                try:
+                    _image_pool.put_nowait((url, image_bytes, ctype))
+                except asyncio.QueueFull:
+                    pass
+    except Exception:
+        pass
+
+@tasks.loop(minutes=35)
+async def random_mood_drop():
+    if not VC_CHANNEL_ID: return
+    channel = bot.get_channel(VC_CHANNEL_ID)
+    if not channel: return
+    for vc_id in VC_IDS:
+        vc = bot.get_channel(vc_id)
+        if vc and isinstance(vc, discord.VoiceChannel):
+            if [m for m in vc.members if not m.bot]:
+                try:
+                    await channel.send(random.choice(MOOD_MESSAGES))
+                except Exception:
+                    pass
+                break
+
+# ── Bot events ─────────────────────────────────────────────────────────────────
+
 @bot.event
 async def on_ready():
-    global bot
+    global _image_pool
     logger.info(f"Logged in as {bot.user}")
-    bot.session = aiohttp.ClientSession(timeout=aiohttp.ClientTimeout(total=REQUEST_TIMEOUT))
-    for task in (autosave_task, periodic_vc_drop, vc_reconnect_heartbeat, status_cycle):
-        if not task.is_running(): task.start()
+
+    connector = aiohttp.TCPConnector(
+        limit=15,
+        limit_per_host=3,
+        ttl_dns_cache=600,
+        enable_cleanup_closed=True,
+    )
+    bot.http_session = aiohttp.ClientSession(connector=connector)
+
+    _image_pool = asyncio.Queue(maxsize=6)
+
+    asyncio.create_task(_keep_alive_server())
+
+    for task in (autosave_task, periodic_vc_drop, vc_reconnect_heartbeat,
+                 prefetch_pool_filler, random_mood_drop):
+        if not task.is_running():
+            task.start()
+
     for guild in bot.guilds:
         try:
             await update_vc_position(guild)
         except Exception:
             pass
-    logger.info("✅ Waifu Bot is fully awake and ready~")
 
 @bot.event
 async def on_close():
-    if bot.session:
-        await bot.session.close()
+    try:
+        if hasattr(bot, "http_session") and not bot.http_session.closed:
+            await bot.http_session.close()
+    except Exception:
+        pass
+    await save_data()
 
 @bot.event
 async def on_voice_state_update(member, before, after):
     if member.id == bot.user.id: return
-    guild = member.guild
+    guild   = member.guild
     channel = bot.get_channel(VC_CHANNEL_ID) if VC_CHANNEL_ID else None
 
     was_monitored = before and before.channel and before.channel.id in VC_IDS
-    now_monitored = after and after.channel and after.channel.id in VC_IDS
+    now_monitored = after  and after.channel  and after.channel.id  in VC_IDS
 
     if was_monitored or now_monitored:
         if now_monitored and (not was_monitored or before.channel.id != after.channel.id):
@@ -898,35 +1289,37 @@ async def on_voice_state_update(member, before, after):
 
     if not channel: return
 
-    uid = str(member.id)
-    is_first = uid not in data["first_seen"]
-    if is_first and now_monitored:
-        data["first_seen"][uid] = datetime.datetime.now().isoformat()
+    if now_monitored and (not was_monitored or before.channel.id != after.channel.id):
+        await maybe_send_daily_open(channel)
 
-    async with bot.session:
-        if now_monitored and (not was_monitored or before.channel.id != after.channel.id):
-            greeting_list = get_greeting_list(True, is_first)
-            greeting = random.choice(greeting_list).format(display_name=member.display_name)
-            gif_url, _, _ = await fetch_gif(bot.session, member.id)
-            if gif_url:
-                await send_greeting_embed(channel, bot.session, greeting, gif_url, member, send_to_dm=member)
-            else:
-                msg = await channel.send(greeting)
-                await msg.add_reaction("❤️")
+        greeting = get_join_greeting(member)
 
-        elif was_monitored and not now_monitored:
-            greeting_list = get_greeting_list(False, False)
-            leave_msg = random.choice(greeting_list).format(display_name=member.display_name)
-            gif_url, _, _ = await fetch_gif(bot.session, member.id)
-            if gif_url:
-                await send_greeting_embed(channel, bot.session, leave_msg, gif_url, member, send_to_dm=member)
-            else:
-                msg = await channel.send(leave_msg)
-                await msg.add_reaction("❤️")
+        others = [m for m in after.channel.members if not m.bot and m.id != member.id]
+        if not others:
+            greeting += "\n*— alone in the dark. interesting choice.*"
+        elif len(others) >= 4:
+            greeting += f"\n*— {len(others)} others already here. the audience is ready.*"
+
+        gif_url, _, _ = await fetch_gif(bot.http_session, member.id)
+        if gif_url:
+            await send_greeting_embed(channel, bot.http_session, greeting, gif_url, member,
+                                      send_to_dm=member, event_type="join")
+        else:
+            await _safe_send(channel, content=greeting)
+
+    elif was_monitored and not now_monitored:
+        leave_msg = get_leave_greeting(member.display_name)
+        gif_url, _, _ = await fetch_gif(bot.http_session, member.id)
+        if gif_url:
+            await send_greeting_embed(channel, bot.http_session, leave_msg, gif_url, member,
+                                      send_to_dm=member, event_type="leave")
+        else:
+            await _safe_send(channel, content=leave_msg)
+
+# ── Run ────────────────────────────────────────────────────────────────────────
 
 if not TOKEN:
     logger.error("TOKEN env var is not set.")
     sys.exit(1)
 
-keep_alive()
 bot.run(TOKEN)
