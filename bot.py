@@ -1319,6 +1319,22 @@ async def on_voice_state_update(member, before, after):
 
 # ── NEW: on_message — command channel filter + neko prefix + suggestions ───────
 
+# Pre-built command list string (built once at startup, reused every time)
+_COMMANDS_LIST_MSG = (
+    "📋 **Available Commands:**\n"
+    "```\n"
+    "69          aibooru     aihentai    anal        bfuck\n"
+    "boobjob     boobs       butt        cum         danbooru\n"
+    "dickride    doujin      e621        fap         footjob\n"
+    "fuck        futafuck    gelbooru    grabboobs   grabbutts\n"
+    "handjob     happyend    hentai      hentaigif   hentaijk\n"
+    "hvideo      irl         konachan    kuni        lewdere\n"
+    "lewdkitsune lewdneko    paizuri     pussy       realbooru\n"
+    "rule34      safebooru   suck        suckboobs   threesome\n"
+    "trap        vtuber      yaoifuck    yurifuck\n"
+    "```"
+)
+
 @bot.event
 async def on_message(message):
     # Ignore messages from bots (including self)
@@ -1334,23 +1350,22 @@ async def on_message(message):
                 await message.delete()
             except Exception:
                 pass
-            warn = await message.channel.send(
-                f"⚠️ {message.author.mention} Only `neko` commands are allowed here.\n"
-                f"Example: `neko hentai`"
+            # Message 1: full command list
+            await message.channel.send(_COMMANDS_LIST_MSG)
+            # Message 2: example with @username
+            await message.channel.send(
+                f"✅ **Example:** `neko hentai` {message.author.mention}"
             )
-            await asyncio.sleep(4)
-            try:
-                await warn.delete()
-            except Exception:
-                pass
             return  # Do NOT process commands — message was invalid
 
         # Rule 2: must have a command word after "neko"
         parts = message.content.split()
         if len(parts) < 2:
+            # Message 1: full command list
+            await message.channel.send(_COMMANDS_LIST_MSG)
+            # Message 2: example with @username
             await message.channel.send(
-                f"⚠️ {message.author.mention} Please include a command after `neko`.\n"
-                f"Example: `neko hentai`"
+                f"✅ **Example:** `neko hentai` {message.author.mention}"
             )
             return
 
@@ -1362,12 +1377,15 @@ async def on_message(message):
             if suggestions:
                 suggestion_text = "\n".join([f"`neko {s}`" for s in suggestions])
                 await message.channel.send(
-                    f"❓ Unknown command **`{cmd}`**\n\nDid you mean:\n{suggestion_text}"
+                    f"❓ Unknown command **`{cmd}`**\n\nDid you mean:\n{suggestion_text}\n\n"
+                    f"✅ **Example:** `neko hentai` {message.author.mention}"
                 )
             else:
+                # No suggestions — show full list + example
+                await message.channel.send(_COMMANDS_LIST_MSG)
                 await message.channel.send(
-                    f"❌ Unknown command **`{cmd}`** — no close matches found.\n"
-                    f"Type `neko help` to see all available commands."
+                    f"❌ Unknown command **`{cmd}`** {message.author.mention}\n"
+                    f"✅ **Example:** `neko hentai`"
                 )
             return  # Do NOT process an unknown command
 
