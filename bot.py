@@ -1,5 +1,6 @@
 import os, sys, io, json, random, hashlib, logging, re, asyncio, base64, datetime
 import xml.etree.ElementTree as ET
+import difflib
 from collections import deque
 from urllib.parse import quote_plus
 
@@ -70,6 +71,11 @@ VC_CHANNEL_ID = int(os.getenv("VC_CHANNEL_ID", "0"))
 _VC_IDS_RAW   = os.getenv("VC_IDS", "")
 VC_IDS        = [int(x.strip()) for x in _VC_IDS_RAW.split(",") if x.strip().isdigit()] if _VC_IDS_RAW.strip() else []
 
+# ── NEW: Command channel ID ────────────────────────────────────────────────────
+# Set COMMAND_CHANNEL_ID env var to the channel where neko commands are allowed.
+# If 0, the on_message filter is disabled and commands work in any channel.
+COMMAND_CHANNEL_ID = int(os.getenv("COMMAND_CHANNEL_ID", "0"))
+
 # ── Logging ────────────────────────────────────────────────────────────────────
 
 logging.basicConfig(
@@ -82,6 +88,8 @@ if not VC_IDS:
     logger.warning("[VC] VC_IDS env var not set — voice channel features disabled.")
 if not VC_CHANNEL_ID:
     logger.warning("[VC] VC_CHANNEL_ID env var not set — text channel messages disabled.")
+if not COMMAND_CHANNEL_ID:
+    logger.warning("[CMD] COMMAND_CHANNEL_ID env var not set — neko command filter disabled.")
 
 # ── Data persistence ───────────────────────────────────────────────────────────
 
@@ -1140,6 +1148,22 @@ bot = commands.Bot(command_prefix="!", intents=intents)
 
 _image_pool = None  # asyncio.Queue — initialized in on_ready
 
+# ── NEW: Command list & suggestion system ──────────────────────────────────────
+
+COMMANDS = [
+    "69", "aibooru", "aihentai", "anal", "bfuck", "boobjob", "boobs",
+    "butt", "cum", "danbooru", "dickride", "doujin", "e621", "fap",
+    "footjob", "fuck", "futafuck", "gelbooru", "grabboobs", "grabbutts",
+    "handjob", "happyend", "hentai", "hentaigif", "hentaijk", "hvideo",
+    "irl", "konachan", "kuni", "lewdere", "lewdkitsune", "lewdneko",
+    "paizuri", "pussy", "realbooru", "rule34", "safebooru", "suck",
+    "suckboobs", "threesome", "trap", "vtuber", "yaoifuck", "yurifuck",
+]
+
+def suggest_commands(text):
+    """Return up to 5 close matches from COMMANDS using fuzzy matching."""
+    return difflib.get_close_matches(text, COMMANDS, n=5, cutoff=0.3)
+
 # ── Background tasks ───────────────────────────────────────────────────────────
 
 @tasks.loop(seconds=AUTOSAVE_INTERVAL)
@@ -1292,6 +1316,63 @@ async def on_voice_state_update(member, before, after):
                                       send_to_dm=member, event_type="leave")
         else:
             await _safe_send(channel, content=leave_msg)
+
+# ── NEW: on_message — command channel filter + neko prefix + suggestions ───────
+
+@bot.event
+async def on_message(message):
+    # Ignore messages from bots (including self)
+    if message.author.bot:
+        return
+
+    # If COMMAND_CHANNEL_ID is set, enforce rules only in that channel
+    if COMMAND_CHANNEL_ID and message.channel.id == COMMAND_CHANNEL_ID:
+
+        # Rule 1: every message must start with "neko" (case-insensitive)
+        if not message.content.lower().startswith("neko"):
+            try:
+                await message.delete()
+            except Exception:
+                pass
+            warn = await message.channel.send(
+                f"⚠️ {message.author.mention} Only `neko` commands are allowed here.\n"
+                f"Example: `neko hentai`"
+            )
+            await asyncio.sleep(4)
+            try:
+                await warn.delete()
+            except Exception:
+                pass
+            return  # Do NOT process commands — message was invalid
+
+        # Rule 2: must have a command word after "neko"
+        parts = message.content.split()
+        if len(parts) < 2:
+            await message.channel.send(
+                f"⚠️ {message.author.mention} Please include a command after `neko`.\n"
+                f"Example: `neko hentai`"
+            )
+            return
+
+        cmd = parts[1].lower()
+
+        # Rule 3: command must be in the COMMANDS list
+        if cmd not in COMMANDS:
+            suggestions = suggest_commands(cmd)
+            if suggestions:
+                suggestion_text = "\n".join([f"`neko {s}`" for s in suggestions])
+                await message.channel.send(
+                    f"❓ Unknown command **`{cmd}`**\n\nDid you mean:\n{suggestion_text}"
+                )
+            else:
+                await message.channel.send(
+                    f"❌ Unknown command **`{cmd}`** — no close matches found.\n"
+                    f"Type `neko help` to see all available commands."
+                )
+            return  # Do NOT process an unknown command
+
+    # Always process bot commands (handles ! prefix commands in any channel)
+    await bot.process_commands(message)
 
 # ── Run ────────────────────────────────────────────────────────────────────────
 
