@@ -1335,64 +1335,79 @@ async def send_greeting_embed(channel, session, greeting_text, image_url, member
 
 # ── Voice channel utilities ────────────────────────────────────────────────────
 
-def get_vcs_with_users(guild):
-    out = []
+def _vc_has_users(vc: discord.VoiceChannel) -> bool:
+    """True if this VC has at least one non-bot member."""
+    return any(m for m in vc.members if not m.bot)
+
+async def _move_bot(guild: discord.Guild, go_to: discord.VoiceChannel = None):
+    """
+    Core movement rule — called on every VC event.
+
+    Priority order:
+      1. If go_to is given (a specific monitored VC to follow a joining user) → go there.
+      2. If already in the correct VC → do nothing.
+      3. Find any monitored VC that has users → move there (first in VC_IDS order).
+      4. Nobody anywhere → stay wherever the bot currently is (never disconnect).
+      5. Bot somehow not connected at all → connect to first available VC_IDS channel.
+    """
+    if not VC_IDS:
+        return
+
+    vc_client = guild.voice_client
+
+    # ── Step 1: hard follow — user joined a specific monitored VC ──
+    if go_to and go_to.id in VC_IDS:
+        if vc_client and vc_client.is_connected():
+            if vc_client.channel.id == go_to.id:
+                return  # already there
+            try:
+                await vc_client.move_to(go_to)
+            except Exception as e:
+                logger.warning(f"[VC] move_to {go_to.name} failed: {e}")
+        else:
+            try:
+                await go_to.connect()
+            except Exception as e:
+                logger.warning(f"[VC] connect to {go_to.name} failed: {e}")
+        return
+
+    # ── Step 2: find any monitored VC that currently has users ──
+    best = None
     for vc_id in VC_IDS:
         vc = guild.get_channel(vc_id)
-        if vc and isinstance(vc, discord.VoiceChannel):
-            users = [m for m in vc.members if not m.bot]
-            if users: out.append((vc, users))
-    return out
+        if vc and isinstance(vc, discord.VoiceChannel) and _vc_has_users(vc):
+            best = vc
+            break
 
-async def update_vc_position(guild, target_channel=None):
-    vc_client = guild.voice_client
-    if target_channel and target_channel.id in VC_IDS:
-        users = [m for m in target_channel.members if not m.bot]
-        if users:
+    if best:
+        if vc_client and vc_client.is_connected():
+            if vc_client.channel.id == best.id:
+                return  # already in the right place
             try:
-                if vc_client and vc_client.is_connected():
-                    if vc_client.channel.id != target_channel.id:
-                        await vc_client.move_to(target_channel)
-                else:
-                    await target_channel.connect()
-                return target_channel
-            except Exception:
-                pass
+                await vc_client.move_to(best)
+            except Exception as e:
+                logger.warning(f"[VC] move_to {best.name} failed: {e}")
+        else:
+            try:
+                await best.connect()
+            except Exception as e:
+                logger.warning(f"[VC] connect to {best.name} failed: {e}")
+        return
 
+    # ── Step 3: nobody in any monitored VC — stay put or connect to first VC ──
     if vc_client and vc_client.is_connected():
-        current = vc_client.channel
-        if current and current.id in VC_IDS:
-            users = [m for m in current.members if not m.bot]
-            if users:
-                return current
+        return  # already connected somewhere, do nothing
 
-    vcs = get_vcs_with_users(guild)
-    if vcs:
-        order = {vid: i for i, vid in enumerate(VC_IDS)}
-        vcs.sort(key=lambda x: order.get(x[0].id, 999))
-        target_vc = vcs[0][0]
-        try:
-            if vc_client and vc_client.is_connected():
-                if vc_client.channel.id != target_vc.id:
-                    await vc_client.move_to(target_vc)
-            else:
-                await target_vc.connect()
-            return target_vc
-        except Exception:
-            pass
-
-    if vc_client and vc_client.is_connected():
-        return vc_client.channel
-
+    # Not connected at all — connect to first valid VC in list
     for vc_id in VC_IDS:
         vc = guild.get_channel(vc_id)
         if vc and isinstance(vc, discord.VoiceChannel):
             try:
                 await vc.connect()
-                return vc
-            except Exception:
+                return
+            except Exception as e:
+                logger.warning(f"[VC] startup connect to {vc.name} failed: {e}")
                 continue
-    return None
 
 # ── Bot setup ──────────────────────────────────────────────────────────────────
 
@@ -1430,32 +1445,15 @@ async def autosave_task():
 
 @tasks.loop(seconds=300)
 async def vc_reconnect_heartbeat():
+    """Every 5 min: if the bot got kicked/disconnected, reconnect it."""
     for guild in bot.guilds:
         try:
             vc_client = guild.voice_client
-            if vc_client and vc_client.is_connected(): continue
-            connected = False
-            for vc_id in VC_IDS:
-                vc = guild.get_channel(vc_id)
-                if vc and isinstance(vc, discord.VoiceChannel):
-                    if [m for m in vc.members if not m.bot]:
-                        try:
-                            await vc.connect()
-                            connected = True
-                            break
-                        except Exception:
-                            pass
-            if not connected:
-                for vc_id in VC_IDS:
-                    vc = guild.get_channel(vc_id)
-                    if vc and isinstance(vc, discord.VoiceChannel):
-                        try:
-                            await vc.connect()
-                            break
-                        except Exception:
-                            pass
-        except Exception:
-            pass
+            if vc_client and vc_client.is_connected():
+                continue  # still connected — nothing to do
+            await _move_bot(guild)
+        except Exception as e:
+            logger.warning(f"[VC heartbeat] {e}")
 
 @tasks.loop(seconds=20)
 async def prefetch_pool_filler():
@@ -1527,7 +1525,7 @@ async def on_ready():
 
     for guild in bot.guilds:
         try:
-            await update_vc_position(guild)
+            await _move_bot(guild)
         except Exception:
             pass
 
@@ -1563,14 +1561,19 @@ async def on_voice_state_update(member, before, after):
     guild   = member.guild
     channel = bot.get_channel(VC_CHANNEL_ID) if VC_CHANNEL_ID else None
 
-    was_monitored = before and before.channel and before.channel.id in VC_IDS
-    now_monitored = after  and after.channel  and after.channel.id  in VC_IDS
+    was_monitored = before.channel is not None and before.channel.id in VC_IDS
+    now_monitored = after.channel  is not None and after.channel.id  in VC_IDS
 
-    if was_monitored or now_monitored:
-        if now_monitored and (not was_monitored or before.channel.id != after.channel.id):
-            await update_vc_position(guild, target_channel=after.channel)
-        else:
-            await update_vc_position(guild)
+    # ── Move the bot ──────────────────────────────────────────────────────────
+    if now_monitored and (not was_monitored or before.channel.id != after.channel.id):
+        # User joined a monitored VC (or switched into one) → follow immediately
+        await _move_bot(guild, go_to=after.channel)
+    elif was_monitored and not now_monitored:
+        # User left a monitored VC → find best VC or stay
+        await _move_bot(guild)
+    elif was_monitored and now_monitored and before.channel.id != after.channel.id:
+        # User switched between two monitored VCs → follow
+        await _move_bot(guild, go_to=after.channel)
 
     if not channel: return
 
