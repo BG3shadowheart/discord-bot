@@ -178,26 +178,9 @@ async def compress_image(image_bytes, target_size=DISCORD_MAX_UPLOAD):
 
 # ── API provider tag lists ─────────────────────────────────────────────────────
 
-SPICY_TAGS = [
-    "ahegao", "creampie", "cum_inside", "gangbang", "double_penetration",
-    "deepthroat", "paizuri", "titfuck", "throatfuck", "facesitting",
-    "doggy_style", "missionary", "squirting", "bondage", "bdsm",
-    "tentacles", "orgasm", "riding", "thighjob", "cumshot", "blowjob",
-    "anal", "pussy", "hardcore", "futanari", "public", "group",
-    "nude", "naked", "sex", "handjob", "footjob", "femdom",
-    "harem", "milf", "big_breasts", "large_breasts", "busty",
-    "ass", "buttjob", "spanking", "hypnosis", "mind_break",
-    "pov", "solo_female", "multiple_boys", "cum_on_face",
-    "spread_legs", "cum_on_body", "breast_grab", "nipples",
-]
+SPICY_TAGS = []
 
-_seed_gif_tags = [
-    "hentai", "sex", "blowjob", "anal", "creampie", "cumshot", "ahegao",
-    "paizuri", "gangbang", "deepthroat", "tentacles", "futanari", "orgasm",
-    "squirt", "bondage", "milf", "oppai", "pussy", "hardcore", "animated",
-    "nude", "naked", "big_breasts", "femdom", "pov", "ass", "busty",
-    "nipples", "spread_legs", "riding", "deepthroat",
-]
+_seed_gif_tags = []
 
 GIF_TAGS = list(dict.fromkeys(_seed_gif_tags))
 
@@ -206,10 +189,6 @@ GIF_TAGS = list(dict.fromkeys(_seed_gif_tags))
 async def _gelbooru_compat(session, base_url, api_key=None, user_id=None, extra_tags=None):
     try:
         tags = ["rating:explicit"]
-        if random.random() < 0.85:
-            tags.append(random.choice(SPICY_TAGS))
-        if random.random() < 0.60:
-            tags.append("animated")
         if extra_tags:
             tags.extend(extra_tags)
         params = {
@@ -228,7 +207,7 @@ async def _gelbooru_compat(session, base_url, api_key=None, user_id=None, extra_
             if not posts: return None, None, None
             post = random.choice(posts)
             gif_url = post.get("file_url")
-            if not gif_url or gif_url.lower().endswith((".webm", ".mp4", ".swf")):
+            if not gif_url:
                 return None, None, None
             return gif_url, base_url, post
     except Exception:
@@ -237,8 +216,6 @@ async def _gelbooru_compat(session, base_url, api_key=None, user_id=None, extra_
 async def fetch_rule34(session, positive=None):
     try:
         tags = ["rating:explicit"]
-        if random.random() < 0.90: tags.append(random.choice(SPICY_TAGS))
-        if random.random() < 0.70: tags.append("animated")
         params = {
             "page": "dapi", "s": "post", "q": "index",
             "json": "1", "tags": " ".join(tags), "limit": 120,
@@ -250,7 +227,7 @@ async def fetch_rule34(session, positive=None):
             if not posts: return None, None, None
             post = random.choice(posts)
             gif_url = post.get("file_url")
-            if not gif_url or gif_url.lower().endswith((".webm", ".mp4", ".swf")):
+            if not gif_url:
                 return None, None, None
             return gif_url, "rule34", post
     except Exception:
@@ -266,8 +243,6 @@ async def fetch_gelbooru(session, positive=None):
 async def fetch_nekosapi(session, positive=None):
     try:
         params = {"rating": "explicit", "limit": 5}
-        if random.random() < 0.80:
-            params["tags"] = random.choice(SPICY_TAGS)
         to = aiohttp.ClientTimeout(total=REQUEST_TIMEOUT)
         async with session.get("https://api.nekosapi.com/v4/images/random", params=params, timeout=to) as resp:
             if resp.status != 200: return None, None, None
@@ -282,8 +257,6 @@ async def fetch_nekosapi(session, positive=None):
 async def fetch_konachan(session, positive=None):
     try:
         tags = ["rating:explicit"]
-        if random.random() < 0.85: tags.append(random.choice(SPICY_TAGS).replace("_", " "))
-        if random.random() < 0.60: tags.append("animated")
         params = {"tags": " ".join(tags), "limit": 20}
         hdrs = {"User-Agent": "WaifuBot/1.0"}
         to = aiohttp.ClientTimeout(total=REQUEST_TIMEOUT)
@@ -293,7 +266,7 @@ async def fetch_konachan(session, positive=None):
             if not posts: return None, None, None
             image_posts = [
                 p for p in posts
-                if p.get("file_url") and not p.get("file_url", "").lower().endswith((".webm", ".mp4"))
+                if p.get("file_url")
             ]
             if not image_posts: return None, None, None
             post = random.choice(image_posts)
@@ -316,8 +289,6 @@ async def fetch_nekobot(session, positive=None):
 async def fetch_danbooru(session, positive=None):
     try:
         tags = ["rating:explicit"]
-        if random.random() < 0.85: tags.append(random.choice(SPICY_TAGS))
-        if random.random() < 0.60: tags.append("animated")
         params = {"tags": " ".join(tags), "limit": 20, "random": "true"}
         auth = aiohttp.BasicAuth(DANBOORU_USER, DANBOORU_API_KEY) if (DANBOORU_USER and DANBOORU_API_KEY) else None
         to = aiohttp.ClientTimeout(total=REQUEST_TIMEOUT)
@@ -327,7 +298,7 @@ async def fetch_danbooru(session, positive=None):
             if not posts: return None, None, None
             post = random.choice(posts)
             gif_url = post.get("file_url") or post.get("large_file_url")
-            if not gif_url or gif_url.lower().endswith((".webm", ".mp4", ".swf")):
+            if not gif_url:
                 return None, None, None
             return gif_url, "danbooru", post
     except Exception:
@@ -391,7 +362,7 @@ async def fetch_paheal(session, positive=None):
             if not posts: return None, None, None
             post = random.choice(posts)
             gif_url = post.get("file_url")
-            if not gif_url or gif_url.lower().endswith((".webm", ".mp4", ".swf", ".flv")):
+            if not gif_url:
                 return None, None, None
             return gif_url, "paheal", {"file_url": gif_url}
     except Exception:
@@ -443,7 +414,6 @@ async def fetch_waifu_pics(session, positive=None):
 async def fetch_e621(session, positive=None):
     try:
         tags = ["rating:explicit", "order:random"]
-        if random.random() < 0.85: tags.append(random.choice(SPICY_TAGS))
         params = {"tags": " ".join(tags), "limit": 20}
         hdrs = {"User-Agent": "WaifuBot/1.0 (by discord_bot_operator on e621)"}
         auth = aiohttp.BasicAuth(E621_USER, E621_API_KEY) if E621_USER and E621_API_KEY else None
@@ -468,7 +438,6 @@ async def fetch_e621(session, positive=None):
 async def fetch_yandere(session, positive=None):
     try:
         tags = ["rating:explicit", "order:random"]
-        if random.random() < 0.85: tags.append(random.choice(SPICY_TAGS).replace("_", " "))
         params = {"tags": " ".join(tags), "limit": 20}
         hdrs = {"User-Agent": "WaifuBot/1.0"}
         to = aiohttp.ClientTimeout(total=REQUEST_TIMEOUT)
@@ -478,7 +447,7 @@ async def fetch_yandere(session, positive=None):
             if not posts: return None, None, None
             image_posts = [
                 p for p in posts
-                if p.get("file_url") and not p.get("file_url", "").lower().endswith((".webm", ".mp4"))
+                if p.get("file_url")
             ]
             if not image_posts: return None, None, None
             post = random.choice(image_posts)
@@ -623,7 +592,7 @@ THEMED_JOINS = {
         "🌑 {display_name} crept in past midnight — the darkest hours are the most honest.",
         "🕯️ {display_name} arrived while everyone sleeps. The night belongs to you both.",
         "🌙 {display_name} showed up at midnight. Some invitations aren't spoken aloud.",
-        "🖤 {display_name} joins the midnight crowd — awake when the world forgets to watch.",
+        "🖤 {display_name} joined the midnight crowd — awake when the world forgets to watch.",
         "🌌 {display_name} drifted in under starless dark. Something about them fits.",
     ],
     "morning": [
@@ -684,7 +653,7 @@ JOIN_GREETINGS = [
     "🫦 {display_name} joined — lips curved, promise implied.",
     "🎶 {display_name} arrived on a private rhythm; follow if you want to sway.",
     "🌪️ {display_name} joined — whirlwinds look calm until they hit.",
-    "🖤 {display_name} slipped in, hush and hunger wrapped together.",
+    "🖤 {display_name} slipped in — the shadows made room for them.",
     "💼 {display_name} entered composed — look closer, there's mischief under the suit.",
     "💫 {display_name} joined and the room took a breathless pause.",
     "🩸 {display_name} enters — the room tightens like it knows what's coming.",
@@ -1172,7 +1141,6 @@ async def autosave_task():
         await save_data()
     except Exception:
         pass
-
 
 @tasks.loop(seconds=300)
 async def vc_reconnect_heartbeat():
