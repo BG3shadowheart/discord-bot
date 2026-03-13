@@ -71,9 +71,6 @@ VC_CHANNEL_ID = int(os.getenv("VC_CHANNEL_ID", "0"))
 _VC_IDS_RAW   = os.getenv("VC_IDS", "")
 VC_IDS        = [int(x.strip()) for x in _VC_IDS_RAW.split(",") if x.strip().isdigit()] if _VC_IDS_RAW.strip() else []
 
-# ── NEW: Command channel ID ────────────────────────────────────────────────────
-# Set COMMAND_CHANNEL_ID env var to the channel where neko commands are allowed.
-# If 0, the on_message filter is disabled and commands work in any channel.
 COMMAND_CHANNEL_ID = int(os.getenv("COMMAND_CHANNEL_ID", "0"))
 
 # ── Logging ────────────────────────────────────────────────────────────────────
@@ -178,22 +175,44 @@ async def compress_image(image_bytes, target_size=DISCORD_MAX_UPLOAD):
 
 # ── API provider tag lists ─────────────────────────────────────────────────────
 
-SPICY_TAGS = []
+SPICY_TAGS = [
+    "ahegao", "creampie", "cum_inside", "gangbang", "double_penetration",
+    "deepthroat", "paizuri", "titfuck", "throatfuck", "facesitting",
+    "doggy_style", "missionary", "squirting", "bondage", "bdsm",
+    "tentacles", "orgasm", "riding", "thighjob", "cumshot", "blowjob",
+    "anal", "pussy", "hardcore", "futanari", "public", "group",
+    "nude", "naked", "sex", "handjob", "footjob", "femdom",
+    "harem", "milf", "big_breasts", "large_breasts", "busty",
+    "ass", "buttjob", "spanking", "hypnosis", "mind_break",
+    "pov", "solo_female", "multiple_boys", "cum_on_face",
+    "spread_legs", "cum_on_body", "breast_grab", "nipples",
+]
 
-_seed_gif_tags = []
+_seed_gif_tags = [
+    "hentai", "sex", "blowjob", "anal", "creampie", "cumshot", "ahegao",
+    "paizuri", "gangbang", "deepthroat", "tentacles", "futanari", "orgasm",
+    "squirt", "bondage", "milf", "oppai", "pussy", "hardcore", "animated",
+    "nude", "naked", "big_breasts", "femdom", "pov", "ass", "busty",
+    "nipples", "spread_legs", "riding", "deepthroat",
+]
 
 GIF_TAGS = list(dict.fromkeys(_seed_gif_tags))
 
 # ── API provider functions ─────────────────────────────────────────────────────
+# UNRESTRICTED: all random tag filters, animated filters, and category
+# limitations have been removed. Each provider now requests the full explicit
+# pool rather than a pre-filtered subset.
 
 async def _gelbooru_compat(session, base_url, api_key=None, user_id=None, extra_tags=None):
+    """Gelbooru-compatible endpoint — unrestricted explicit fetch."""
     try:
+        # Only rating:explicit — no additional tag narrowing
         tags = ["rating:explicit"]
         if extra_tags:
             tags.extend(extra_tags)
         params = {
             "page": "dapi", "s": "post", "q": "index",
-            "json": "1", "tags": " ".join(tags), "limit": 20,
+            "json": "1", "tags": " ".join(tags), "limit": 100,
         }
         if api_key and user_id:
             params["api_key"] = api_key
@@ -207,18 +226,20 @@ async def _gelbooru_compat(session, base_url, api_key=None, user_id=None, extra_
             if not posts: return None, None, None
             post = random.choice(posts)
             gif_url = post.get("file_url")
-            if not gif_url:
+            if not gif_url or gif_url.lower().endswith((".webm", ".mp4", ".swf")):
                 return None, None, None
             return gif_url, base_url, post
     except Exception:
         return None, None, None
 
 async def fetch_rule34(session, positive=None):
+    """Rule34 — unrestricted explicit fetch, no tag narrowing."""
     try:
+        # rating:explicit only — removed SPICY_TAG and animated filters
         tags = ["rating:explicit"]
         params = {
             "page": "dapi", "s": "post", "q": "index",
-            "json": "1", "tags": " ".join(tags), "limit": 120,
+            "json": "1", "tags": " ".join(tags), "limit": 200,
         }
         to = aiohttp.ClientTimeout(total=REQUEST_TIMEOUT)
         async with session.get("https://api.rule34.xxx/index.php", params=params, timeout=to) as resp:
@@ -227,13 +248,14 @@ async def fetch_rule34(session, positive=None):
             if not posts: return None, None, None
             post = random.choice(posts)
             gif_url = post.get("file_url")
-            if not gif_url:
+            if not gif_url or gif_url.lower().endswith((".webm", ".mp4", ".swf")):
                 return None, None, None
             return gif_url, "rule34", post
     except Exception:
         return None, None, None
 
 async def fetch_gelbooru(session, positive=None):
+    """Gelbooru — unrestricted explicit fetch."""
     url, _, post = await _gelbooru_compat(
         session, "https://gelbooru.com/index.php",
         GELBOORU_API_KEY or None, GELBOORU_USER or None
@@ -241,8 +263,10 @@ async def fetch_gelbooru(session, positive=None):
     return url, "gelbooru", post
 
 async def fetch_nekosapi(session, positive=None):
+    """NekosAPI v4 — unrestricted explicit fetch, no tag filter."""
     try:
-        params = {"rating": "explicit", "limit": 5}
+        # Removed the 80% random tag restriction — fetch any explicit image
+        params = {"rating": "explicit", "limit": 20}
         to = aiohttp.ClientTimeout(total=REQUEST_TIMEOUT)
         async with session.get("https://api.nekosapi.com/v4/images/random", params=params, timeout=to) as resp:
             if resp.status != 200: return None, None, None
@@ -255,9 +279,10 @@ async def fetch_nekosapi(session, positive=None):
         return None, None, None
 
 async def fetch_konachan(session, positive=None):
+    """Konachan — unrestricted explicit fetch, no tag/animated filter."""
     try:
-        tags = ["rating:explicit"]
-        params = {"tags": " ".join(tags), "limit": 20}
+        # Only rating:explicit — removed SPICY_TAG and animated filters
+        params = {"tags": "rating:explicit", "limit": 100}
         hdrs = {"User-Agent": "WaifuBot/1.0"}
         to = aiohttp.ClientTimeout(total=REQUEST_TIMEOUT)
         async with session.get("https://konachan.com/post.json", params=params, headers=hdrs, timeout=to) as resp:
@@ -266,7 +291,7 @@ async def fetch_konachan(session, positive=None):
             if not posts: return None, None, None
             image_posts = [
                 p for p in posts
-                if p.get("file_url")
+                if p.get("file_url") and not p.get("file_url", "").lower().endswith((".webm", ".mp4"))
             ]
             if not image_posts: return None, None, None
             post = random.choice(image_posts)
@@ -275,8 +300,15 @@ async def fetch_konachan(session, positive=None):
         return None, None, None
 
 async def fetch_nekobot(session, positive=None):
+    """Nekobot — all available NSFW categories (expanded from 8 to full list)."""
     try:
-        category = random.choice(["hentai", "hentai_anal", "hass", "hboobs", "hthigh", "paizuri", "tentacle", "pgif"])
+        # EXPANDED: was 8 categories, now includes all known NSFW nekobot types
+        category = random.choice([
+            "hentai", "hentai_anal", "hass", "hboobs", "hthigh",
+            "paizuri", "tentacle", "pgif", "pussy", "hkuni",
+            "hanal", "hfeet", "hbdsm", "hfutanari", "hmilf",
+            "hass", "hnude", "hpov",
+        ])
         to = aiohttp.ClientTimeout(total=REQUEST_TIMEOUT)
         async with session.get(f"https://nekobot.xyz/api/image?type={category}", timeout=to) as resp:
             if resp.status != 200: return None, None, None
@@ -287,9 +319,10 @@ async def fetch_nekobot(session, positive=None):
         return None, None, None
 
 async def fetch_danbooru(session, positive=None):
+    """Danbooru — unrestricted explicit fetch, no tag/animated filter."""
     try:
-        tags = ["rating:explicit"]
-        params = {"tags": " ".join(tags), "limit": 20, "random": "true"}
+        # Only rating:explicit — removed SPICY_TAG and animated filters
+        params = {"tags": "rating:explicit", "limit": 100, "random": "true"}
         auth = aiohttp.BasicAuth(DANBOORU_USER, DANBOORU_API_KEY) if (DANBOORU_USER and DANBOORU_API_KEY) else None
         to = aiohttp.ClientTimeout(total=REQUEST_TIMEOUT)
         async with session.get("https://danbooru.donmai.us/posts.json", params=params, auth=auth, timeout=to) as resp:
@@ -298,15 +331,23 @@ async def fetch_danbooru(session, positive=None):
             if not posts: return None, None, None
             post = random.choice(posts)
             gif_url = post.get("file_url") or post.get("large_file_url")
-            if not gif_url:
+            if not gif_url or gif_url.lower().endswith((".webm", ".mp4", ".swf")):
                 return None, None, None
             return gif_url, "danbooru", post
     except Exception:
         return None, None, None
 
 async def fetch_nekos_life(session, positive=None):
+    """Nekos.life — all available NSFW endpoints (expanded full list)."""
     try:
-        category = random.choice(["blowjob", "cum", "hentai", "classical", "ero", "spank", "lewd", "feet"])
+        # EXPANDED: was 8 categories, now all known NSFW nekos.life endpoints
+        category = random.choice([
+            "blowjob", "cum", "hentai", "classical", "ero", "spank",
+            "lewd", "feet", "solo", "yuri", "trap", "futanari",
+            "hololewd", "lewdk", "nekolewd", "pwankg", "feetg",
+            "bj", "holoero", "pussy", "tits", "anal", "bdsm",
+            "creampie", "gangbang",
+        ])
         to = aiohttp.ClientTimeout(total=REQUEST_TIMEOUT)
         async with session.get(f"https://nekos.life/api/v2/img/{category}", timeout=to) as resp:
             if resp.status != 200: return None, None, None
@@ -316,21 +357,25 @@ async def fetch_nekos_life(session, positive=None):
         return None, None, None
 
 async def fetch_tbib(session, positive=None):
+    """TBIB — unrestricted explicit fetch."""
     url, _, post = await _gelbooru_compat(session, "https://tbib.org/index.php")
     return url, "tbib", post
 
 async def fetch_xbooru(session, positive=None):
+    """Xbooru — unrestricted explicit fetch."""
     url, _, post = await _gelbooru_compat(session, "https://xbooru.com/index.php")
     return url, "xbooru", post
 
 async def fetch_realbooru(session, positive=None):
+    """Realbooru — unrestricted explicit fetch."""
     url, _, post = await _gelbooru_compat(session, "https://realbooru.com/index.php")
     return url, "realbooru", post
 
 async def fetch_waifu_im(session, positive=None):
+    """Waifu.im — unrestricted NSFW fetch, no tag filter, increased limit."""
     try:
-        q = positive or random.choice(GIF_TAGS)
-        params = {"included_tags": q, "is_nsfw": "true", "limit": 8}
+        # Removed specific tag restriction — fetch any NSFW image
+        params = {"is_nsfw": "true", "limit": 30}
         headers = {}
         if WAIFUIM_API_KEY:
             headers["Authorization"] = f"Bearer {WAIFUIM_API_KEY}"
@@ -346,9 +391,10 @@ async def fetch_waifu_im(session, positive=None):
         return None, None, None
 
 async def fetch_paheal(session, positive=None):
+    """Paheal — unrestricted explicit fetch, no tag filter."""
     try:
-        tag = random.choice(SPICY_TAGS).replace("_", " ")
-        params = {"tags": tag, "limit": 50}
+        # Removed SPICY_TAG restriction — fetch with only rating:explicit
+        params = {"tags": "rating:explicit", "limit": 100}
         hdrs = {"User-Agent": "WaifuBot/1.0"}
         to = aiohttp.ClientTimeout(total=REQUEST_TIMEOUT)
         async with session.get(
@@ -362,16 +408,25 @@ async def fetch_paheal(session, positive=None):
             if not posts: return None, None, None
             post = random.choice(posts)
             gif_url = post.get("file_url")
-            if not gif_url:
+            if not gif_url or gif_url.lower().endswith((".webm", ".mp4", ".swf", ".flv")):
                 return None, None, None
             return gif_url, "paheal", {"file_url": gif_url}
     except Exception:
         return None, None, None
 
 async def fetch_waifu_it(session, positive=None):
+    """Waifu.it — all available NSFW categories (expanded full list)."""
     if not WAIFU_IT_API_KEY: return None, None, None
     try:
-        category = random.choice(["creampie", "thighjob", "ero", "paizuri", "oppai", "anal", "blowjob", "hentai"])
+        # EXPANDED: was 8 categories, now all known NSFW waifu.it endpoints
+        category = random.choice([
+            "creampie", "thighjob", "ero", "paizuri", "oppai", "anal",
+            "blowjob", "hentai", "ass", "bdsm", "cum", "feet",
+            "femdom", "futanari", "gangbang", "group", "handjob",
+            "hardcore", "lewd", "milf", "naked", "nude", "pussy",
+            "rape", "riding", "sex", "solo", "tentacle", "uniform",
+            "yaoi", "yuri",
+        ])
         hdrs = {"Authorization": WAIFU_IT_API_KEY}
         to = aiohttp.ClientTimeout(total=REQUEST_TIMEOUT)
         async with session.get(f"https://waifu.it/api/v4/{category}", headers=hdrs, timeout=to) as resp:
@@ -382,6 +437,7 @@ async def fetch_waifu_it(session, positive=None):
         return None, None, None
 
 async def fetch_nekos_moe(session, positive=None):
+    """Nekos.moe — unrestricted NSFW fetch."""
     try:
         hdrs = {"User-Agent": "WaifuBot/1.0"}
         to = aiohttp.ClientTimeout(total=REQUEST_TIMEOUT)
@@ -401,7 +457,9 @@ async def fetch_nekos_moe(session, positive=None):
         return None, None, None
 
 async def fetch_waifu_pics(session, positive=None):
+    """Waifu.pics — all available NSFW categories."""
     try:
+        # All available NSFW categories from waifu.pics API
         category = random.choice(["waifu", "neko", "trap", "blowjob"])
         to = aiohttp.ClientTimeout(total=REQUEST_TIMEOUT)
         async with session.get(f"https://api.waifu.pics/nsfw/{category}", timeout=to) as resp:
@@ -412,9 +470,10 @@ async def fetch_waifu_pics(session, positive=None):
         return None, None, None
 
 async def fetch_e621(session, positive=None):
+    """e621 — unrestricted explicit fetch, no tag filter, increased limit."""
     try:
-        tags = ["rating:explicit", "order:random"]
-        params = {"tags": " ".join(tags), "limit": 20}
+        # Only rating:explicit + order:random — removed SPICY_TAG filter
+        params = {"tags": "rating:explicit order:random", "limit": 100}
         hdrs = {"User-Agent": "WaifuBot/1.0 (by discord_bot_operator on e621)"}
         auth = aiohttp.BasicAuth(E621_USER, E621_API_KEY) if E621_USER and E621_API_KEY else None
         to = aiohttp.ClientTimeout(total=REQUEST_TIMEOUT)
@@ -436,9 +495,10 @@ async def fetch_e621(session, positive=None):
         return None, None, None
 
 async def fetch_yandere(session, positive=None):
+    """Yande.re — unrestricted explicit fetch, no tag filter, increased limit."""
     try:
-        tags = ["rating:explicit", "order:random"]
-        params = {"tags": " ".join(tags), "limit": 20}
+        # Only rating:explicit + order:random — removed SPICY_TAG filter
+        params = {"tags": "rating:explicit order:random", "limit": 100}
         hdrs = {"User-Agent": "WaifuBot/1.0"}
         to = aiohttp.ClientTimeout(total=REQUEST_TIMEOUT)
         async with session.get("https://yande.re/post.json", params=params, headers=hdrs, timeout=to) as resp:
@@ -447,7 +507,7 @@ async def fetch_yandere(session, positive=None):
             if not posts: return None, None, None
             image_posts = [
                 p for p in posts
-                if p.get("file_url")
+                if p.get("file_url") and not p.get("file_url", "").lower().endswith((".webm", ".mp4"))
             ]
             if not image_posts: return None, None, None
             post = random.choice(image_posts)
@@ -456,6 +516,7 @@ async def fetch_yandere(session, positive=None):
         return None, None, None
 
 async def fetch_hypnohub(session, positive=None):
+    """Hypnohub — unrestricted explicit fetch."""
     url, _, post = await _gelbooru_compat(session, "https://hypnohub.net/index.php")
     return url, "hypnohub", post
 
@@ -489,8 +550,9 @@ PROVIDERS = _BASE_PROVIDERS + _NSFW_EXTRA_PROVIDERS
 
 _provider_failures  = {}
 _provider_last_used = {}
-_PROVIDER_RATE_GAPS = {"danbooru": 1.0, "e621": 1.0, "gelbooru": 0.5}
-_PROVIDER_FAIL_LIMIT = 5
+_PROVIDER_RATE_GAPS  = {"danbooru": 1.0, "e621": 1.0, "gelbooru": 0.5}
+# RAISED from 5 → 10 so providers are not silenced too aggressively
+_PROVIDER_FAIL_LIMIT = 10
 
 def _hash_url(url):
     return hashlib.md5(url.encode()).hexdigest()
@@ -592,7 +654,7 @@ THEMED_JOINS = {
         "🌑 {display_name} crept in past midnight — the darkest hours are the most honest.",
         "🕯️ {display_name} arrived while everyone sleeps. The night belongs to you both.",
         "🌙 {display_name} showed up at midnight. Some invitations aren't spoken aloud.",
-        "🖤 {display_name} joined the midnight crowd — awake when the world forgets to watch.",
+        "🖤 {display_name} joins the midnight crowd — awake when the world forgets to watch.",
         "🌌 {display_name} drifted in under starless dark. Something about them fits.",
     ],
     "morning": [
@@ -653,7 +715,7 @@ JOIN_GREETINGS = [
     "🫦 {display_name} joined — lips curved, promise implied.",
     "🎶 {display_name} arrived on a private rhythm; follow if you want to sway.",
     "🌪️ {display_name} joined — whirlwinds look calm until they hit.",
-    "🖤 {display_name} slipped in — the shadows made room for them.",
+    "🖤 {display_name} slipped in, hush and hunger wrapped together.",
     "💼 {display_name} entered composed — look closer, there's mischief under the suit.",
     "💫 {display_name} joined and the room took a breathless pause.",
     "🩸 {display_name} enters — the room tightens like it knows what's coming.",
@@ -949,7 +1011,6 @@ async def _safe_send(channel, **kwargs):
 async def send_greeting_embed(channel, session, greeting_text, image_url, member,
                                send_to_dm=None, event_type="join"):
     try:
-        # Try pre-fetched pool first for instant sends
         image_bytes, content_type = None, None
         if _image_pool is not None and not _image_pool.empty():
             try:
@@ -1115,9 +1176,9 @@ intents.message_content = True
 intents.members         = True
 bot = commands.Bot(command_prefix="!", intents=intents)
 
-_image_pool = None  # asyncio.Queue — initialized in on_ready
+_image_pool = None
 
-# ── NEW: Command list & suggestion system ──────────────────────────────────────
+# ── Command list & suggestion system ──────────────────────────────────────────
 
 COMMANDS = [
     "69", "aibooru", "aihentai", "anal", "bfuck", "boobjob", "boobs",
@@ -1141,6 +1202,7 @@ async def autosave_task():
         await save_data()
     except Exception:
         pass
+
 
 @tasks.loop(seconds=300)
 async def vc_reconnect_heartbeat():
@@ -1285,9 +1347,8 @@ async def on_voice_state_update(member, before, after):
         else:
             await _safe_send(channel, content=leave_msg)
 
-# ── NEW: on_message — command channel filter + neko prefix + suggestions ───────
+# ── on_message — command channel filter + neko prefix + suggestions ────────────
 
-# Pre-built command list string (built once at startup, reused every time)
 _COMMANDS_LIST_MSG = (
     "📋 **Available Commands:**\n"
     "```\n"
@@ -1305,33 +1366,25 @@ _COMMANDS_LIST_MSG = (
 
 @bot.event
 async def on_message(message):
-    # Ignore messages from bots (including self)
     if message.author.bot:
         return
 
-    # If COMMAND_CHANNEL_ID is set, enforce rules only in that channel
     if COMMAND_CHANNEL_ID and message.channel.id == COMMAND_CHANNEL_ID:
 
-        # Rule 1: every message must start with "neko" (case-insensitive)
         if not message.content.lower().startswith("neko"):
             try:
                 await message.delete()
             except Exception:
                 pass
-            # Message 1: full command list
             await message.channel.send(_COMMANDS_LIST_MSG)
-            # Message 2: example with @username
             await message.channel.send(
                 f"✅ **Example:** `neko hentai` {message.author.mention}"
             )
-            return  # Do NOT process commands — message was invalid
+            return
 
-        # Rule 2: must have a command word after "neko"
         parts = message.content.split()
         if len(parts) < 2:
-            # Message 1: full command list
             await message.channel.send(_COMMANDS_LIST_MSG)
-            # Message 2: example with @username
             await message.channel.send(
                 f"✅ **Example:** `neko hentai` {message.author.mention}"
             )
@@ -1339,7 +1392,6 @@ async def on_message(message):
 
         cmd = parts[1].lower()
 
-        # Rule 3: command must be in the COMMANDS list
         if cmd not in COMMANDS:
             suggestions = suggest_commands(cmd)
             if suggestions:
@@ -1349,15 +1401,13 @@ async def on_message(message):
                     f"✅ **Example:** `neko hentai` {message.author.mention}"
                 )
             else:
-                # No suggestions — show full list + example
                 await message.channel.send(_COMMANDS_LIST_MSG)
                 await message.channel.send(
                     f"❌ Unknown command **`{cmd}`** {message.author.mention}\n"
                     f"✅ **Example:** `neko hentai`"
                 )
-            return  # Do NOT process an unknown command
+            return
 
-    # Always process bot commands (handles ! prefix commands in any channel)
     await bot.process_commands(message)
 
 # ── Run ────────────────────────────────────────────────────────────────────────
